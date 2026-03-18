@@ -174,17 +174,17 @@ async function main(): Promise<void> {
   // ============================================================
   console.log('Layer 1: Structured extraction...');
 
-  const existingTimeline = readFileIfExists(path.join(outputDir, 'project-timeline.md'));
-  const existingOpenThreads = readFileIfExists(path.join(outputDir, 'open-threads.md'));
+  const existingTimeline = readFileIfExists(path.join(outputDir, '项目时间线.md'));
+  const existingOpenThreads = readFileIfExists(path.join(outputDir, '未完成线索.md'));
 
   const layer1Result = await runLayer1(
     registry, noiseFilter, mergedProjects, since,
     existingTimeline, existingOpenThreads,
   );
 
-  fs.writeFileSync(path.join(outputDir, 'project-timeline.md'), layer1Result.timelineContent);
-  fs.writeFileSync(path.join(outputDir, 'open-threads.md'), layer1Result.openThreadsContent);
-  console.log('  Written: project-timeline.md, open-threads.md');
+  fs.writeFileSync(path.join(outputDir, '项目时间线.md'), layer1Result.timelineContent);
+  fs.writeFileSync(path.join(outputDir, '未完成线索.md'), layer1Result.openThreadsContent);
+  console.log('  Written: 项目时间线.md, 未完成线索.md');
 
   // Count stats
   let totalSessionsProcessed = 0;
@@ -224,17 +224,17 @@ async function main(): Promise<void> {
   console.log('\nLayer 2: Semi-structured extraction...');
 
   const sourceSummary = await registry.getSourceSummary();
-  const existingWorkPatterns = readFileIfExists(path.join(outputDir, 'work-patterns.md'));
-  const existingTechPrefs = readFileIfExists(path.join(outputDir, 'tech-preferences.md'));
+  const existingWorkPatterns = readFileIfExists(path.join(outputDir, '工作模式.md'));
+  const existingTechPrefs = readFileIfExists(path.join(outputDir, '技术偏好.md'));
 
   const layer2Result = await runLayer2(
     registry, noiseFilter, mergedProjects, sourceSummary,
     existingWorkPatterns, existingTechPrefs,
   );
 
-  fs.writeFileSync(path.join(outputDir, 'work-patterns.md'), layer2Result.workPatternsContent);
-  fs.writeFileSync(path.join(outputDir, 'tech-preferences.md'), layer2Result.techPreferencesContent);
-  console.log('  Written: work-patterns.md, tech-preferences.md');
+  fs.writeFileSync(path.join(outputDir, '工作模式.md'), layer2Result.workPatternsContent);
+  fs.writeFileSync(path.join(outputDir, '技术偏好.md'), layer2Result.techPreferencesContent);
+  console.log('  Written: 工作模式.md, 技术偏好.md');
   console.log(`  Task types: ${layer2Result.taskTypes.length} categories`);
   console.log(`  Tech mentions: ${layer2Result.techMentions.length} technologies detected`);
 
@@ -255,9 +255,9 @@ async function main(): Promise<void> {
       consolidation_model: config.layer3?.consolidation_model,
     };
 
-    const existingDecisions = readFileIfExists(path.join(outputDir, 'decisions.md'));
-    const existingPainPoints = readFileIfExists(path.join(outputDir, 'pain-points.md'));
-    const existingWorkProfile = readFileIfExists(path.join(outputDir, 'work-profile.md'));
+    const existingDecisions = readFileIfExists(path.join(outputDir, '决策日志.md'));
+    const existingPainPoints = readFileIfExists(path.join(outputDir, '反复痛点.md'));
+    const existingWorkProfile = readFileIfExists(path.join(outputDir, '工作画像.md'));
 
     const layer3Result = await runLayer3(
       registry, noiseFilter, mergedProjects, layer3Config,
@@ -269,10 +269,10 @@ async function main(): Promise<void> {
       lastExtraction?.layer3?.preferences,
     );
 
-    fs.writeFileSync(path.join(outputDir, 'decisions.md'), layer3Result.decisionsContent);
-    fs.writeFileSync(path.join(outputDir, 'pain-points.md'), layer3Result.painPointsContent);
-    fs.writeFileSync(path.join(outputDir, 'work-profile.md'), layer3Result.workProfileContent);
-    console.log('  Written: decisions.md, pain-points.md, work-profile.md');
+    fs.writeFileSync(path.join(outputDir, '决策日志.md'), layer3Result.decisionsContent);
+    fs.writeFileSync(path.join(outputDir, '反复痛点.md'), layer3Result.painPointsContent);
+    fs.writeFileSync(path.join(outputDir, '工作画像.md'), layer3Result.workProfileContent);
+    console.log('  Written: 决策日志.md, 反复痛点.md, 工作画像.md');
     console.log(`  Decisions extracted: ${layer3Result.decisions.length}`);
     console.log(`  Pain points extracted: ${layer3Result.painPoints.length}`);
     console.log(`  Sessions processed by AI: ${layer3Result.processedSessionIds.length}`);

@@ -18,6 +18,7 @@ export interface Layer3Config {
   api_key?: string;
   api_base_url?: string;
   model?: string;
+  consolidation_model?: string;  // stronger model for consolidation (e.g. sonnet)
 }
 
 export interface Decision {
@@ -104,6 +105,12 @@ function scoreSession(
   return score;
 }
 
+/** Filter out subagent sessions (titles containing @ are delegated tasks, not human decisions) */
+function isSubagentSession(session: Session): boolean {
+  if (!session.title) return false;
+  return /\(@\w+/.test(session.title) || /subagent\)/i.test(session.title);
+}
+
 export async function selectHighValueSessions(
   registry: AdapterRegistry,
   noiseFilter: NoiseFilter,
@@ -120,10 +127,13 @@ export async function selectHighValueSessions(
     for (const session of sessions) {
       if (alreadyProcessed.has(session.id)) continue;
 
-      // Necessary condition: user messages > 5
-      // We check messageCount as a proxy; for accuracy we'd need getMessages
-      // but messageCount is available from adapter cache
-      if (session.messageCount <= 10) continue; // rough proxy: total msgs > 10 means user msgs likely > 5
+      // Skip subagent sessions — delegated tasks, not human decision-making
+      if (isSubagentSession(session)) continue;
+
+      // Necessary condition: actually count user messages (not just proxy via messageCount)
+      const messages = await registry.getMessages(session);
+      const userMsgCount = messages.filter(m => m.role === 'user').length;
+      if (userMsgCount <= 5) continue;
 
       const score = scoreSession(session, sessions);
       if (score >= config.min_score) {
@@ -194,10 +204,12 @@ async function callAI(
   systemPrompt: string,
   conversationText: string,
   config: Layer3Config,
+  modelOverride?: string,
+  maxTokens: number = 2048,
 ): Promise<string | null> {
   const apiKey = config.api_key || process.env.ANTHROPIC_API_KEY;
   const baseUrl = config.api_base_url || process.env.ANTHROPIC_API_BASE_URL || 'https://api.anthropic.com';
-  const model = config.model || 'anthropic/claude-haiku-4.5';
+  const model = modelOverride || config.model || 'anthropic/claude-haiku-4.5';
 
   if (!apiKey) return null;
 
@@ -218,7 +230,7 @@ async function callAI(
         },
         body: JSON.stringify({
           model,
-          max_tokens: 2048,
+          max_tokens: maxTokens,
           system: systemPrompt,
           messages: [{ role: 'user', content: conversationText }],
         }),
@@ -233,7 +245,7 @@ async function callAI(
         },
         body: JSON.stringify({
           model,
-          max_tokens: 2048,
+          max_tokens: maxTokens,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: conversationText },
@@ -341,11 +353,6 @@ export async function runLayer3(
       batch.map(async ({ session, projectName }) => {
         const sourceLabel = registry.getSourceLabel(session.source);
         const messages = await registry.getMessages(session);
-
-        // Verify user message count > 5
-        const userMsgCount = messages.filter(m => m.role === 'user').length;
-        if (userMsgCount <= 5) return { sessionId: session.id, skipped: true };
-
         const conversation = formatConversation(messages);
         const dateStr = new Date(session.timeCreated).toISOString().split('T')[0];
 
@@ -401,15 +408,26 @@ export async function runLayer3(
     }
   }
 
+  // Consolidation: AI-powered dedup, filtering, and aggregation
+  console.log(`  Consolidating results (${allDecisions.length} decisions, ${allPainPoints.length} pain points, ${allPreferences.length} preferences)...`);
+
+  const [consolidatedDecisions, consolidatedPainPoints, consolidatedPreferences] = await Promise.all([
+    consolidateDecisions(allDecisions, config),
+    consolidatePainPoints(allPainPoints, config),
+    consolidatePreferences(allPreferences, config),
+  ]);
+
+  console.log(`  After consolidation: ${consolidatedDecisions.length} decisions, ${consolidatedPainPoints.length} pain points, ${consolidatedPreferences.length} preferences`);
+
   // Render output files
-  const decisionsContent = renderDecisions(allDecisions, sourceSummary, existingDecisions);
-  const painPointsContent = renderPainPoints(allPainPoints, sourceSummary, existingPainPoints);
-  const workProfileContent = renderWorkProfile(allPreferences, sourceSummary, existingWorkProfile);
+  const decisionsContent = renderDecisions(consolidatedDecisions, sourceSummary, existingDecisions);
+  const painPointsContent = renderPainPoints(consolidatedPainPoints, sourceSummary, existingPainPoints);
+  const workProfileContent = renderWorkProfile(consolidatedPreferences, sourceSummary, existingWorkProfile);
 
   return {
-    decisions: allDecisions,
-    painPoints: allPainPoints,
-    preferences: allPreferences,
+    decisions: consolidatedDecisions,
+    painPoints: consolidatedPainPoints,
+    preferences: consolidatedPreferences,
     processedSessionIds: processedIds,
     failedSessionIds: failedIds,
     decisionsContent,
@@ -437,6 +455,162 @@ function emptyResult(
     painPointsContent: renderPainPoints(previousPainPoints ?? [], sourceSummary, existingPainPoints),
     workProfileContent: renderWorkProfile(previousPreferences ?? [], sourceSummary, existingWorkProfile),
   };
+}
+
+// ============================================================
+// Consolidation — AI-powered dedup, filtering, aggregation
+// ============================================================
+
+const CONSOLIDATE_DECISIONS_PROMPT = `你是一个决策日志编辑器。你的任务是从原始提取结果中筛选出真正的技术/产品决策。
+
+**保留标准**（必须同时满足）：
+1. 是真正的"选 A 不选 B"的决策，有被明确否决的替代方案
+2. 是用户做出的决策（不是 AI 助手的操作，如切换模型、读取文件等）
+3. 是架构/产品/技术选型级别的决策（不是具体代码细节，如"用 nanoid 生成 ID"这种）
+
+**删除**：
+- 任务描述伪装成决策（只是做了某事，没有真正的替代方案被考虑）
+- AI 助手的操作（切换模型、读取文档）
+- 代码实现细节（函数命名、索引创建等）
+- alternatives 明显是 AI 捏造的（如"不做这件事"这种伪替代方案）
+
+**合并**：同一 session 中关于同一主题的多个微决策合并为一个
+
+输入是 JSON 数组，输出精炼后的 JSON 数组（保持相同结构）。只返回 JSON，不要解释。
+输出格式：{ "decisions": [...] }`;
+
+const CONSOLIDATE_PAIN_POINTS_PROMPT = `你是一个痛点分析编辑器。你的任务是聚合和筛选原始提取的痛点。
+
+**删除**：
+- AI 助手自身的故障（工具找不到、TODO 循环、prompt injection 检测）— 这些不是用户的工程痛点
+- 功能需求伪装成痛点（"需要添加归档按钮"不是痛点）
+- 系统指令/OH-MY-OPENCODE 相关的重复条目
+
+**聚合**：
+- 描述同一个技术问题的多条记录合并为一条，累加出现频率
+- 合并后保留最好的诊断和解决方案描述
+- 来源列出所有相关 session
+
+**保留**：真正的工程技术问题（性能瓶颈、兼容性问题、配置难题、反复出现的 bug 等）
+
+输入是 JSON 数组，输出精炼后的 JSON 数组。只返回 JSON。
+输出格式：{ "pain_points": [...] }`;
+
+const CONSOLIDATE_PREFERENCES_PROMPT = `你是一个用户画像编辑器。你需要把数百条重复、散乱的观察压缩成一份精炼的用户画像。
+
+**目标**：8-12 个分类，每个分类 3-8 条不重复的观察，总计 40-60 条。
+
+**必须使用的分类**（中文）：
+- 交互风格（如何与 AI 对话）
+- 语言偏好（中英文使用模式）
+- 工作节奏（任务分解、迭代方式）
+- 技术审美（简单 vs 复杂、务实 vs 完美）
+- AI 协作模式（如何使用 AI、对 AI 的期望）
+- 质量标准（对准确性、验证的要求）
+- 需求表达（如何描述需求）
+- 领域特征（涉及的技术/业务领域）
+
+**规则**：
+1. "用户使用中文"只说一次
+2. 合并同义观察（"指令式交互"和"命令式交互"是同一个意思）
+3. 如果有矛盾（如"讨论式"和"指令式"），合成为"复杂任务讨论式，简单任务指令式"
+4. 删除关于 AI 自身行为的观察
+5. 每条观察必须有具体 evidence，不能太抽象
+
+输入是 JSON 数组，输出精炼后的 JSON 数组。只返回 JSON。
+输出格式：{ "preferences": [{ "category": "分类名", "observation": "观察", "evidence": "证据" }] }`;
+
+async function consolidateDecisions(decisions: Decision[], config: Layer3Config): Promise<Decision[]> {
+  if (decisions.length === 0) return decisions;
+
+  // Process per project to stay within context limits
+  const byProject = new Map<string, Decision[]>();
+  for (const d of decisions) {
+    if (!byProject.has(d.projectName)) byProject.set(d.projectName, []);
+    byProject.get(d.projectName)!.push(d);
+  }
+
+  const result: Decision[] = [];
+  for (const [projectName, decs] of byProject) {
+    // Serialize decisions for AI (strip to essentials)
+    const input = decs.map(d => ({
+      what: d.what, why: d.why, alternatives: d.alternatives,
+      trigger: d.trigger, date: d.date,
+      sessionId: d.sessionId, sessionTitle: d.sessionTitle,
+      sourceLabel: d.sourceLabel, projectName: d.projectName,
+    }));
+
+    const text = JSON.stringify(input, null, 0);
+    // If small enough, skip consolidation
+    if (decs.length <= 3) {
+      result.push(...decs);
+      continue;
+    }
+
+    const cModel = config.consolidation_model;
+    const response = await callAI(CONSOLIDATE_DECISIONS_PROMPT, text, config, cModel, 8192);
+    const parsed = parseJSON<{ decisions: Decision[] }>(response);
+    if (parsed?.decisions) {
+      // Restore projectName for all entries
+      for (const d of parsed.decisions) d.projectName = projectName;
+      result.push(...parsed.decisions);
+    } else {
+      result.push(...decs); // fallback: keep raw
+    }
+  }
+
+  return result;
+}
+
+async function consolidatePainPoints(painPoints: PainPoint[], config: Layer3Config): Promise<PainPoint[]> {
+  if (painPoints.length <= 5) return painPoints;
+
+  // Process per project to stay within context limits
+  const byProject = new Map<string, PainPoint[]>();
+  for (const p of painPoints) {
+    if (!byProject.has(p.projectName)) byProject.set(p.projectName, []);
+    byProject.get(p.projectName)!.push(p);
+  }
+
+  const result: PainPoint[] = [];
+  for (const [projectName, points] of byProject) {
+    if (points.length <= 3) {
+      result.push(...points);
+      continue;
+    }
+
+    const input = points.map(p => ({
+      problem: p.problem, diagnosis: p.diagnosis, solution: p.solution,
+      likely_recurring: p.likely_recurring,
+      sessionId: p.sessionId, sessionTitle: p.sessionTitle,
+      sourceLabel: p.sourceLabel, projectName: p.projectName,
+    }));
+
+    const cModel = config.consolidation_model;
+    const response = await callAI(CONSOLIDATE_PAIN_POINTS_PROMPT, JSON.stringify(input, null, 0), config, cModel, 8192);
+    const parsed = parseJSON<{ pain_points: PainPoint[] }>(response);
+    if (parsed?.pain_points) {
+      for (const p of parsed.pain_points) p.projectName = projectName;
+      result.push(...parsed.pain_points);
+    } else {
+      result.push(...points);
+    }
+  }
+
+  return result;
+}
+
+async function consolidatePreferences(preferences: Preference[], config: Layer3Config): Promise<Preference[]> {
+  if (preferences.length <= 10) return preferences;
+
+  const input = preferences.map(p => ({
+    category: p.category, observation: p.observation, evidence: p.evidence,
+  }));
+
+  const cModel = config.consolidation_model;
+  const response = await callAI(CONSOLIDATE_PREFERENCES_PROMPT, JSON.stringify(input, null, 0), config, cModel, 8192);
+  const parsed = parseJSON<{ preferences: Preference[] }>(response);
+  return parsed?.preferences ?? preferences;
 }
 
 // ============================================================

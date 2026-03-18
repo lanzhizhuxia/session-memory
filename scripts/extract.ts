@@ -39,6 +39,7 @@ interface Config {
     api_key?: string;
     api_base_url?: string;
     model?: string;
+    consolidation_model?: string;
   };
   output_dir?: string;
 }
@@ -251,6 +252,7 @@ async function main(): Promise<void> {
       api_key: config.layer3?.api_key,
       api_base_url: config.layer3?.api_base_url,
       model: config.layer3?.model,
+      consolidation_model: config.layer3?.consolidation_model,
     };
 
     const existingDecisions = readFileIfExists(path.join(outputDir, 'decisions.md'));

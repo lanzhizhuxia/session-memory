@@ -12,14 +12,15 @@ session-memory 把这些对话变成 **7 个结构化的 markdown 文件**，构
 
 ```
 ~/.local/share/session-memory/
-├── project-timeline.md      # 每个项目的发展脉络
-├── open-threads.md           # 跨项目未完成线索
-├── work-patterns.md          # 高频工作模式
-├── tech-preferences.md       # 技术偏好图谱
-├── decisions.md              # 决策考古日志
-├── pain-points.md            # 反复痛点模式库
-├── work-profile.md           # 个人工作画像
-└── .last-extraction.json     # 增量提取元数据
+├── 项目时间线.md        # 每个项目的发展脉络（跨源合并，按日期分组）
+├── 未完成线索.md        # 跨项目未完成 todo 汇总
+├── 工作模式.md          # 高频任务类型 + 时段分布 + 首条消息模式
+├── 技术偏好.md          # 跨项目技术关键词提取
+├── 决策日志.md          # AI 提取的技术/产品决策（含替代方案和理由）
+├── 反复痛点.md          # AI 提取的反复出现的工程问题
+├── 工作画像.md          # AI 综合的个人工作画像
+├── .last-extraction.json  # 增量提取元数据
+└── .noise-report.json     # 噪音过滤报告
 ```
 
 ## 谁来消费
@@ -48,19 +49,32 @@ session-memory 把这些对话变成 **7 个结构化的 markdown 文件**，构
 
 | 层 | 方法 | 成本 | 输出 |
 |---|---|---|---|
-| Layer 1 | adapter 查询 | 零 | project-timeline, open-threads |
-| Layer 2 | adapter + 文本匹配 | 极低 | work-patterns, tech-preferences |
-| Layer 3 | AI 批量摘要 | 低（Haiku/Flash） | decisions, pain-points, work-profile |
+| Layer 1 | adapter 查询 | 零 | 项目时间线、未完成线索 |
+| Layer 2 | adapter + 文本匹配 | 极低 | 工作模式、技术偏好 |
+| Layer 3 | AI 批量摘要 + 精炼 | 低（Haiku 提取 + Sonnet 精炼） | 决策日志、反复痛点、工作画像 |
 
 ## 快速开始
 
 ```bash
-# TODO: Phase 0 实现后补充
+# 安装依赖
+npm install
+
+# 创建配置文件
+cp config.example.yaml config.yaml
+# 编辑 config.yaml，配置数据源路径和 Layer 3 API key
+
+# 构建
+npm run build
+
+# 运行提取
+npm run extract
 ```
+
+首次运行会全量提取，后续运行自动增量。Layer 3 需要设置 `ANTHROPIC_API_KEY` 环境变量或在 config.yaml 中配置 `layer3.api_key`。
 
 ## 文档
 
-- [PRD](docs/PRD.md) — 产品需求文档
+- [PRD](docs/PRD.md) — 产品需求文档（v0.6，完整设计规格）
 
 ## 项目结构
 
@@ -76,13 +90,12 @@ session-memory/
 │   │   ├── opencode.ts       # OpenCode adapter (SQLite)
 │   │   └── claude-code.ts    # Claude Code adapter (JSONL)
 │   ├── extractors/           # 三层提取器
-│   │   ├── layer1.ts         # 结构化提取
-│   │   ├── layer2.ts         # 半结构化提取
-│   │   └── layer3.ts         # 深度提取（AI 摘要）
+│   │   ├── layer1.ts         # 结构化提取（时间线 + todo）
+│   │   ├── layer2.ts         # 半结构化提取（工作模式 + 技术偏好）
+│   │   └── layer3.ts         # 深度提取（AI 摘要 + 精炼）
 │   └── utils/                # 工具函数
 │       ├── noise-filter.ts   # 噪音 session 过滤
 │       └── renderer.ts       # Markdown 渲染
-├── output/                   # 本地开发输出（gitignore）
 ├── scripts/                  # 运行脚本
 │   └── extract.ts            # CLI 入口
 └── config.example.yaml       # 配置模板

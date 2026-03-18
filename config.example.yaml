@@ -43,5 +43,5 @@ output_dir: "~/.local/share/session-memory"
 
 # --- 项目路径别名 (§8.4, Phase 2+) ---
 # project_aliases:
-#   - paths: ["/Users/alice/aibuddy", "/Users/bob/aibuddy"]
-#     name: "aibuddy"
+#   - paths: ["/Users/alice/my-project", "/Users/bob/my-project"]
+#     name: "my-project"

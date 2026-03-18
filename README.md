@@ -30,8 +30,7 @@ session-memory 把这些对话变成 **7 个结构化的 markdown 文件**，构
 | 消费者 | 接入方式 |
 |---|---|
 | OpenCode / Claude Code | CLAUDE.md 中 include 文件路径 |
-| aibuddy | 读取注入 workspace 知识库上下文 |
-| openclaw | system prompt 注入 |
+| 你的其他 AI 工具 | 读取注入知识库上下文 / system prompt |
 | 你自己 | 直接打开 review |
 
 ## 数据源

@@ -187,12 +187,8 @@ const PREFERENCE_PROMPT = `你是一个工作风格观察器。只关注用户�
 }`;
 
 // ============================================================
-// AI call
+// AI call — supports OpenAI-compatible (LiteLLM) and Anthropic native APIs
 // ============================================================
-
-interface AIResponse {
-  content: Array<{ type: string; text?: string }>;
-}
 
 async function callAI(
   systemPrompt: string,
@@ -201,34 +197,67 @@ async function callAI(
 ): Promise<string | null> {
   const apiKey = config.api_key || process.env.ANTHROPIC_API_KEY;
   const baseUrl = config.api_base_url || process.env.ANTHROPIC_API_BASE_URL || 'https://api.anthropic.com';
-  const model = config.model || 'claude-haiku-4-5-20251001';
+  const model = config.model || 'anthropic/claude-haiku-4.5';
 
   if (!apiKey) return null;
 
+  // Detect API format: if base URL is NOT api.anthropic.com, use OpenAI-compatible format (LiteLLM)
+  const isAnthropicNative = baseUrl.includes('api.anthropic.com');
+
   try {
-    const res = await fetch(`${baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 2048,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: conversationText }],
-      }),
-    });
+    let res: Response;
+
+    if (isAnthropicNative) {
+      // Anthropic Messages API
+      res = await fetch(`${baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 2048,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: conversationText }],
+        }),
+      });
+    } else {
+      // OpenAI-compatible API (LiteLLM, etc.)
+      res = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 2048,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: conversationText },
+          ],
+        }),
+      });
+    }
 
     if (!res.ok) {
-      console.error(`  AI API error: ${res.status} ${res.statusText}`);
+      const body = await res.text().catch(() => '');
+      console.error(`  AI API error: ${res.status} ${res.statusText} ${body.slice(0, 200)}`);
       return null;
     }
 
-    const data = await res.json() as AIResponse;
-    const text = data.content?.find(c => c.type === 'text')?.text;
-    return text ?? null;
+    const data = await res.json();
+
+    if (isAnthropicNative) {
+      // Anthropic format: { content: [{ type: "text", text: "..." }] }
+      const text = data.content?.find((c: { type: string; text?: string }) => c.type === 'text')?.text;
+      return text ?? null;
+    } else {
+      // OpenAI format: { choices: [{ message: { content: "..." } }] }
+      return data.choices?.[0]?.message?.content ?? null;
+    }
   } catch (err) {
     console.error(`  AI call failed:`, err instanceof Error ? err.message : err);
     return null;

@@ -1,0 +1,19 @@
+{
+  "name": "session-memory",
+  "version": "0.1.0",
+  "description": "Extract structured memory from AI coding assistant conversation history",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "extract": "node dist/scripts/extract.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.13.14",
+    "typescript": "^5.8.2"
+  }
+}

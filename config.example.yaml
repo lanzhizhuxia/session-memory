@@ -1,0 +1,43 @@
+# ============================================================
+# session-memory config.yaml — 完整参考
+# ============================================================
+
+# --- 数据源配置 (§2.4.4) ---
+sources:
+  opencode:
+    enabled: true
+    db_path: "~/.local/share/opencode/opencode.db"
+
+  claude_code:
+    enabled: true
+    base_dir: "~/.claude"
+
+  # 未来扩展
+  # cursor:
+  #   enabled: false
+  #   db_path: "~/Library/Application Support/Cursor/..."
+
+# --- 来源标签 (§2.4.4) ---
+source_labels:
+  opencode: "OC"
+  claude_code: "CC"
+
+# --- 噪音过滤 (§3.2) ---
+noise_filter:
+  exclude_projects:
+    - "some-ci-bot"
+  include_projects: []
+  noise_project_human_threshold: 5     # 用户消息数 > N 的 session 视为人类
+
+# --- Layer 3 AI 提取 (§5.4.1) ---
+layer3:
+  min_score: 3            # 加权分数 ≥ 此值进入 AI 分析
+  max_sessions: 500       # 单次运行上限（safety cap）
+
+# --- 输出 ---
+output_dir: "~/.local/share/session-memory"
+
+# --- 项目路径别名 (§8.4, Phase 2+) ---
+# project_aliases:
+#   - paths: ["/Users/alice/aibuddy", "/Users/bob/aibuddy"]
+#     name: "aibuddy"

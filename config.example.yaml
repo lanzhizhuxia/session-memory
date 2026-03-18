@@ -31,8 +31,12 @@ noise_filter:
 
 # --- Layer 3 AI 提取 (§5.4.1) ---
 layer3:
-  min_score: 3            # 加权分数 ≥ 此值进入 AI 分析
-  max_sessions: 500       # 单次运行上限（safety cap）
+  enabled: true             # 设为 false 跳过 AI 提取
+  min_score: 3              # 加权分数 ≥ 此值进入 AI 分析
+  max_sessions: 500         # 单次运行上限（safety cap）
+  # api_key: "sk-..."       # 或设置 ANTHROPIC_API_KEY 环境变量
+  # api_base_url: "https://api.anthropic.com"  # 自定义 API 端点
+  # model: "claude-haiku-4-5-20251001"          # 默认用 Haiku（成本低）
 
 # --- 输出 ---
 output_dir: "~/.local/share/session-memory"

@@ -7,6 +7,7 @@
 import type { Session, Message, MergedProject } from '../adapters/types.js';
 import type { AdapterRegistry } from '../adapters/registry.js';
 import type { NoiseFilter } from '../utils/noise-filter.js';
+import { computeContentHash, type MemoryDecision, type MemoryPainPoint, type MemoryProfileEntry } from '../memory/types.js';
 
 // ============================================================
 // Types
@@ -59,6 +60,18 @@ export interface Layer3Result {
   decisionsContent: string;
   painPointsContent: string;
   workProfileContent: string;
+}
+
+class SessionProcessingError extends Error {
+  readonly sessionId: string;
+  readonly causeValue: unknown;
+
+  constructor(sessionId: string, causeValue: unknown) {
+    super(`Failed to process session ${sessionId}`);
+    this.name = 'SessionProcessingError';
+    this.sessionId = sessionId;
+    this.causeValue = causeValue;
+  }
 }
 
 // ============================================================
@@ -278,14 +291,29 @@ async function callAI(
 
 function parseJSON<T>(text: string | null): T | null {
   if (!text) return null;
-  try {
-    // Try to extract JSON from markdown code blocks
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const jsonStr = jsonMatch ? jsonMatch[1].trim() : text.trim();
-    return JSON.parse(jsonStr);
-  } catch {
-    return null;
+
+  const trimmedText = text.trim();
+  const candidates = [trimmedText];
+  const jsonMatch = trimmedText.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (jsonMatch?.[1]) {
+    candidates.unshift(jsonMatch[1].trim());
   }
+
+  const objectStart = trimmedText.indexOf('{');
+  const objectEnd = trimmedText.lastIndexOf('}');
+  if (objectStart !== -1 && objectEnd > objectStart) {
+    candidates.push(trimmedText.slice(objectStart, objectEnd + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate) as T;
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
 }
 
 // ============================================================
@@ -293,7 +321,7 @@ function parseJSON<T>(text: string | null): T | null {
 // ============================================================
 
 function formatConversation(messages: Message[], maxMessages: number = 20): string {
-  const trimmed = messages.slice(0, maxMessages);
+  const trimmed = messages.slice(0, Math.max(maxMessages, 1));
   return trimmed.map(m => {
     const prefix = m.role === 'user' ? 'User' : 'Assistant';
     const content = m.content.slice(0, 2000); // truncate long messages
@@ -304,6 +332,31 @@ function formatConversation(messages: Message[], maxMessages: number = 20): stri
 // ============================================================
 // Layer 3 runner
 // ============================================================
+
+function computeDecisionHash(decision: Pick<Decision, 'what' | 'why' | 'alternatives' | 'trigger'>): string {
+  return computeContentHash(JSON.stringify({
+    what: decision.what.trim(),
+    why: decision.why.trim(),
+    alternatives: decision.alternatives.map((item) => item.trim()),
+    trigger: decision.trigger.trim(),
+  }));
+}
+
+function computePainPointHash(painPoint: Pick<PainPoint, 'problem' | 'diagnosis' | 'solution'>): string {
+  return computeContentHash(JSON.stringify({
+    problem: painPoint.problem.trim(),
+    diagnosis: painPoint.diagnosis.trim(),
+    solution: painPoint.solution.trim(),
+  }));
+}
+
+function computePreferenceHash(preference: Pick<Preference, 'category' | 'observation' | 'evidence'>): string {
+  return computeContentHash(JSON.stringify({
+    category: preference.category.trim(),
+    observation: preference.observation.trim(),
+    evidence: preference.evidence.trim(),
+  }));
+}
 
 export async function runLayer3(
   registry: AdapterRegistry,
@@ -318,6 +371,10 @@ export async function runLayer3(
   previousDecisions?: Decision[],
   previousPainPoints?: PainPoint[],
   previousPreferences?: Preference[],
+  memoryDecisions?: MemoryDecision[],
+  memoryPainPoints?: MemoryPainPoint[],
+  memoryProfile?: MemoryProfileEntry[],
+  memoryContentHashes?: string[],
 ): Promise<Layer3Result> {
   const processedSet = new Set(alreadyProcessed);
 
@@ -325,7 +382,7 @@ export async function runLayer3(
   const apiKey = config.api_key || process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.log('  No ANTHROPIC_API_KEY set. Skipping Layer 3 AI extraction.');
-    return emptyResult(sourceSummary, existingDecisions, existingPainPoints, existingWorkProfile, previousDecisions, previousPainPoints, previousPreferences);
+    return emptyResult(sourceSummary, existingDecisions, existingPainPoints, existingWorkProfile, previousDecisions, previousPainPoints, previousPreferences, memoryDecisions, memoryPainPoints, memoryProfile, memoryContentHashes);
   }
 
   // Select high-value sessions
@@ -333,7 +390,7 @@ export async function runLayer3(
   console.log(`  High-value sessions found: ${candidates.length}`);
 
   if (candidates.length === 0) {
-    return emptyResult(sourceSummary, existingDecisions, existingPainPoints, existingWorkProfile, previousDecisions, previousPainPoints, previousPreferences);
+    return emptyResult(sourceSummary, existingDecisions, existingPainPoints, existingWorkProfile, previousDecisions, previousPainPoints, previousPreferences, memoryDecisions, memoryPainPoints, memoryProfile, memoryContentHashes);
   }
 
   const allDecisions: Decision[] = [...(previousDecisions ?? [])];
@@ -351,44 +408,48 @@ export async function runLayer3(
     // Process batch concurrently
     const results = await Promise.allSettled(
       batch.map(async ({ session, projectName }) => {
-        const sourceLabel = registry.getSourceLabel(session.source);
-        const messages = await registry.getMessages(session);
-        const conversation = formatConversation(messages);
-        const dateStr = new Date(session.timeCreated).toISOString().split('T')[0];
+        try {
+          const sourceLabel = registry.getSourceLabel(session.source);
+          const messages = await registry.getMessages(session);
+          if (messages.length === 0) {
+            return { sessionId: session.id, decisions: [], painPoints: [], preferences: [], skipped: true };
+          }
 
-        // Run 3 prompts
-        const [decisionRes, painRes, prefRes] = await Promise.all([
-          callAI(DECISION_PROMPT, conversation, config),
-          callAI(PAIN_POINT_PROMPT, conversation, config),
-          callAI(PREFERENCE_PROMPT, conversation, config),
-        ]);
+          const conversation = formatConversation(messages);
+          const dateStr = new Date(session.timeCreated).toISOString().split('T')[0];
 
-        // Parse decisions
-        const decisionData = parseJSON<{ decisions: Array<{ what: string; why: string; alternatives: string[]; trigger: string; date: string }> }>(decisionRes);
-        const decisions: Decision[] = (decisionData?.decisions ?? []).map(d => ({
-          ...d,
-          date: d.date || dateStr,
-          sessionId: session.id,
-          sessionTitle: session.title ?? '(untitled)',
-          sourceLabel,
-          projectName,
-        }));
+          const [decisionRes, painRes, prefRes] = await Promise.all([
+            callAI(DECISION_PROMPT, conversation, config),
+            callAI(PAIN_POINT_PROMPT, conversation, config),
+            callAI(PREFERENCE_PROMPT, conversation, config),
+          ]);
 
-        // Parse pain points
-        const painData = parseJSON<{ pain_points: Array<{ problem: string; diagnosis: string; solution: string; likely_recurring: boolean }> }>(painRes);
-        const painPoints: PainPoint[] = (painData?.pain_points ?? []).map(p => ({
-          ...p,
-          sessionId: session.id,
-          sessionTitle: session.title ?? '(untitled)',
-          sourceLabel,
-          projectName,
-        }));
+          const decisionData = parseJSON<{ decisions: Array<{ what: string; why: string; alternatives: string[]; trigger: string; date: string }> }>(decisionRes);
+          const decisions: Decision[] = (decisionData?.decisions ?? []).map(d => ({
+            ...d,
+            date: d.date || dateStr,
+            sessionId: session.id,
+            sessionTitle: session.title ?? '(untitled)',
+            sourceLabel,
+            projectName,
+          }));
 
-        // Parse preferences
-        const prefData = parseJSON<{ preferences: Array<{ category: string; observation: string; evidence: string }> }>(prefRes);
-        const preferences: Preference[] = prefData?.preferences ?? [];
+          const painData = parseJSON<{ pain_points: Array<{ problem: string; diagnosis: string; solution: string; likely_recurring: boolean }> }>(painRes);
+          const painPoints: PainPoint[] = (painData?.pain_points ?? []).map(p => ({
+            ...p,
+            sessionId: session.id,
+            sessionTitle: session.title ?? '(untitled)',
+            sourceLabel,
+            projectName,
+          }));
 
-        return { sessionId: session.id, decisions, painPoints, preferences, skipped: false };
+          const prefData = parseJSON<{ preferences: Array<{ category: string; observation: string; evidence: string }> }>(prefRes);
+          const preferences: Preference[] = prefData?.preferences ?? [];
+
+          return { sessionId: session.id, decisions, painPoints, preferences, skipped: false };
+        } catch (error) {
+          throw new SessionProcessingError(session.id, error);
+        }
       })
     );
 
@@ -402,8 +463,14 @@ export async function runLayer3(
         processedIds.push(r.sessionId);
       } else {
         // Failed — record for retry
-        failedIds.push('unknown');
-        console.error(`  Session failed:`, result.reason);
+        const sessionId = result.reason instanceof SessionProcessingError
+          ? result.reason.sessionId
+          : 'unknown';
+        failedIds.push(sessionId);
+        const error = result.reason instanceof SessionProcessingError
+          ? result.reason.causeValue
+          : result.reason;
+        console.error(`  Session failed (${sessionId}):`, error);
       }
     }
   }
@@ -417,17 +484,22 @@ export async function runLayer3(
     consolidatePreferences(allPreferences, config),
   ]);
 
-  console.log(`  After consolidation: ${consolidatedDecisions.length} decisions, ${consolidatedPainPoints.length} pain points, ${consolidatedPreferences.length} preferences`);
+  const memoryHashSet = new Set(memoryContentHashes ?? []);
+  const filteredDecisions = consolidatedDecisions.filter((decision) => !memoryHashSet.has(computeDecisionHash(decision)));
+  const filteredPainPoints = consolidatedPainPoints.filter((painPoint) => !memoryHashSet.has(computePainPointHash(painPoint)));
+  const filteredPreferences = consolidatedPreferences.filter((preference) => !memoryHashSet.has(computePreferenceHash(preference)));
+
+  console.log(`  After consolidation: ${filteredDecisions.length} decisions, ${filteredPainPoints.length} pain points, ${filteredPreferences.length} preferences`);
 
   // Render output files
-  const decisionsContent = renderDecisions(consolidatedDecisions, sourceSummary, existingDecisions);
-  const painPointsContent = renderPainPoints(consolidatedPainPoints, sourceSummary, existingPainPoints);
-  const workProfileContent = renderWorkProfile(consolidatedPreferences, sourceSummary, existingWorkProfile);
+  const decisionsContent = renderDecisions(filteredDecisions, sourceSummary, existingDecisions, memoryDecisions);
+  const painPointsContent = renderPainPoints(filteredPainPoints, sourceSummary, existingPainPoints, memoryPainPoints);
+  const workProfileContent = renderWorkProfile(filteredPreferences, sourceSummary, existingWorkProfile, memoryProfile);
 
   return {
-    decisions: consolidatedDecisions,
-    painPoints: consolidatedPainPoints,
-    preferences: consolidatedPreferences,
+    decisions: filteredDecisions,
+    painPoints: filteredPainPoints,
+    preferences: filteredPreferences,
     processedSessionIds: processedIds,
     failedSessionIds: failedIds,
     decisionsContent,
@@ -444,16 +516,25 @@ function emptyResult(
   previousDecisions?: Decision[],
   previousPainPoints?: PainPoint[],
   previousPreferences?: Preference[],
+  memoryDecisions?: MemoryDecision[],
+  memoryPainPoints?: MemoryPainPoint[],
+  memoryProfile?: MemoryProfileEntry[],
+  memoryContentHashes?: string[],
 ): Layer3Result {
+  const memoryHashSet = new Set(memoryContentHashes ?? []);
+  const decisions = (previousDecisions ?? []).filter((decision) => !memoryHashSet.has(computeDecisionHash(decision)));
+  const painPoints = (previousPainPoints ?? []).filter((painPoint) => !memoryHashSet.has(computePainPointHash(painPoint)));
+  const preferences = (previousPreferences ?? []).filter((preference) => !memoryHashSet.has(computePreferenceHash(preference)));
+
   return {
-    decisions: previousDecisions ?? [],
-    painPoints: previousPainPoints ?? [],
-    preferences: previousPreferences ?? [],
+    decisions,
+    painPoints,
+    preferences,
     processedSessionIds: [],
     failedSessionIds: [],
-    decisionsContent: renderDecisions(previousDecisions ?? [], sourceSummary, existingDecisions),
-    painPointsContent: renderPainPoints(previousPainPoints ?? [], sourceSummary, existingPainPoints),
-    workProfileContent: renderWorkProfile(previousPreferences ?? [], sourceSummary, existingWorkProfile),
+    decisionsContent: renderDecisions(decisions, sourceSummary, existingDecisions, memoryDecisions),
+    painPointsContent: renderPainPoints(painPoints, sourceSummary, existingPainPoints, memoryPainPoints),
+    workProfileContent: renderWorkProfile(preferences, sourceSummary, existingWorkProfile, memoryProfile),
   };
 }
 
@@ -636,12 +717,36 @@ function extractUserNotes(content?: string): string | null {
 }
 
 /** decisions.md — append-type, grouped by project → date */
-function renderDecisions(decisions: Decision[], sourceSummary: string, _existing?: string): string {
+function renderDecisions(decisions: Decision[], sourceSummary: string, _existing?: string, memoryDecisions?: MemoryDecision[]): string {
   const lines: string[] = [];
   lines.push(fmtHeader('决策日志', sourceSummary));
   lines.push('');
 
-  if (decisions.length === 0) {
+  // Memory-derived decisions with stableId markers (PRD §4.5)
+  if (memoryDecisions && memoryDecisions.length > 0) {
+    const memByProject = new Map<string, MemoryDecision[]>();
+    for (const d of memoryDecisions) {
+      if (!memByProject.has(d.projectName)) memByProject.set(d.projectName, []);
+      memByProject.get(d.projectName)!.push(d);
+    }
+    for (const [project, decs] of Array.from(memByProject.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+      lines.push(`## ${project}`);
+      lines.push('');
+      for (const d of decs) {
+        lines.push(`<!-- mem:${d.stableId} -->`);
+        lines.push(`### ${d.date ?? 'unknown'}: ${d.what}`);
+        if (d.trigger) lines.push(`- **背景**: ${d.trigger}`);
+        if (d.alternatives && d.alternatives.length > 0) lines.push(`- **考虑过的方案**: ${d.alternatives.join(', ')}`);
+        lines.push(`- **决定**: ${d.what}`);
+        if (d.why) lines.push(`- **理由**: ${d.why}`);
+        lines.push(`- **来源**: [${d.sourceLabel}] ${d.sourcePath}`);
+        lines.push(`<!-- /mem:${d.stableId} -->`);
+        lines.push('');
+      }
+    }
+  }
+
+  if (decisions.length === 0 && (!memoryDecisions || memoryDecisions.length === 0)) {
     lines.push('*尚未提取到决策记录。*');
     lines.push('');
     return lines.join('\n');
@@ -676,12 +781,25 @@ function renderDecisions(decisions: Decision[], sourceSummary: string, _existing
 }
 
 /** pain-points.md — append-type, grouped by problem */
-function renderPainPoints(painPoints: PainPoint[], sourceSummary: string, _existing?: string): string {
+function renderPainPoints(painPoints: PainPoint[], sourceSummary: string, _existing?: string, memoryPainPoints?: MemoryPainPoint[]): string {
   const lines: string[] = [];
   lines.push(fmtHeader('反复痛点', sourceSummary));
   lines.push('');
 
-  if (painPoints.length === 0) {
+  if (memoryPainPoints && memoryPainPoints.length > 0) {
+    for (const mp of memoryPainPoints) {
+      lines.push(`<!-- mem:${mp.stableId} -->`);
+      lines.push(`## ${mp.problem}`);
+      if (mp.diagnosis) lines.push(`- **典型症状**: ${mp.diagnosis}`);
+      if (mp.solution) lines.push(`- **解决模式**: ${mp.solution}`);
+      if (mp.likelyRecurring != null) lines.push(`- **可能反复**: ${mp.likelyRecurring ? 'yes' : 'no'}`);
+      lines.push(`- **来源**: [${mp.sourceLabel}] ${mp.sourcePath}`);
+      lines.push(`<!-- /mem:${mp.stableId} -->`);
+      lines.push('');
+    }
+  }
+
+  if (painPoints.length === 0 && (!memoryPainPoints || memoryPainPoints.length === 0)) {
     lines.push('*尚未提取到痛点记录。*');
     lines.push('');
     return lines.join('\n');
@@ -707,7 +825,7 @@ function renderPainPoints(painPoints: PainPoint[], sourceSummary: string, _exist
 
     lines.push(`## ${first.problem}`);
     lines.push(`- **出现频率**: ${points.length} 次（${projectSummary}）`);
-    lines.push(`- **典型症状**: ${first.problem}`);
+    lines.push(`- **典型症状**: ${first.diagnosis}`);
     lines.push(`- **解决模式**: ${first.solution}`);
     lines.push(`- **可能反复**: ${first.likely_recurring ? 'yes' : 'no'}`);
     const sourceRefs = points.map(p => `session \`${p.sessionId}\` [${p.sourceLabel}] — "${p.sessionTitle}"`).join(', ');
@@ -719,17 +837,35 @@ function renderPainPoints(painPoints: PainPoint[], sourceSummary: string, _exist
 }
 
 /** work-profile.md — aggregate-type, AI-derived insights */
-function renderWorkProfile(preferences: Preference[], sourceSummary: string, existing?: string): string {
+function renderWorkProfile(preferences: Preference[], sourceSummary: string, existing?: string, memoryProfile?: MemoryProfileEntry[]): string {
   const userNotes = extractUserNotes(existing);
   const lines: string[] = [];
   lines.push(fmtHeader('工作画像', sourceSummary));
   lines.push('');
 
-  if (preferences.length === 0) {
+  if (preferences.length === 0 && (!memoryProfile || memoryProfile.length === 0)) {
     lines.push('*尚未提取到工作偏好。*');
     lines.push('');
   } else {
-    // Group by category
+    // Memory-derived profile entries (rendered first, higher fidelity)
+    if (memoryProfile && memoryProfile.length > 0) {
+      const memCategories = new Map<string, MemoryProfileEntry[]>();
+      for (const p of memoryProfile) {
+        const cat = normalizeCategory(p.category);
+        if (!memCategories.has(cat)) memCategories.set(cat, []);
+        memCategories.get(cat)!.push(p);
+      }
+      for (const [cat, entries] of memCategories) {
+        lines.push(`## ${cat}（记忆来源）`);
+        for (const e of entries) {
+          const evidence = e.evidence ? ` — *${e.evidence}*` : '';
+          lines.push(`- ${e.observation}${evidence} — *[${e.sourceLabel}] ${e.sourcePath}*`);
+        }
+        lines.push('');
+      }
+    }
+
+    // Session-derived preferences
     const categories = new Map<string, Preference[]>();
     for (const p of preferences) {
       const cat = normalizeCategory(p.category);

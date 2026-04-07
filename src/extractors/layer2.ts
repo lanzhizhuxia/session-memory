@@ -7,6 +7,7 @@
 import type { Session, MergedProject } from '../adapters/types.js';
 import type { AdapterRegistry } from '../adapters/registry.js';
 import type { NoiseFilter } from '../utils/noise-filter.js';
+import type { MemoryTechPreference } from '../memory/types.js';
 
 // ============================================================
 // Task type classification — PRD §5.3.1
@@ -79,6 +80,8 @@ interface TechKeyword {
   name: string;
   patterns: RegExp[];
 }
+
+const CATEGORY_ORDER = ['前端', '后端', 'AI', '工具', '部署'];
 
 const TECH_KEYWORDS: TechKeyword[] = [
   // 框架
@@ -167,6 +170,7 @@ export async function runLayer2(
   sourceSummary: string,
   existingWorkPatterns?: string,
   existingTechPrefs?: string,
+  memoryTechPreferences?: MemoryTechPreference[],
 ): Promise<Layer2Result> {
   // Collect all non-noise sessions
   const allSessions: Array<{ session: Session; projectName: string }> = [];
@@ -290,7 +294,7 @@ export async function runLayer2(
 
   // Render
   const workPatternsContent = renderWorkPatterns(taskTypes, hourDistribution, firstMsgPatterns, sourceSummary, existingWorkPatterns);
-  const techPreferencesContent = renderTechPreferences(techMentions, sourceSummary, existingTechPrefs);
+  const techPreferencesContent = renderTechPreferences(techMentions, sourceSummary, existingTechPrefs, memoryTechPreferences);
 
   return {
     taskTypes,
@@ -333,9 +337,9 @@ function renderWorkPatterns(
   lines.push('|---|---|---|---|');
   for (const tt of taskTypes) {
     const example = tt.exampleSession
-      ? `"${tt.exampleSession.title.slice(0, 40)}" [${tt.exampleSession.sourceLabel}]`
+      ? `"${escapeTableCell(tt.exampleSession.title.slice(0, 40))}" [${tt.exampleSession.sourceLabel}]`
       : '—';
-    lines.push(`| ${tt.category} | ${tt.count} | ${tt.percent}% | ${example} |`);
+    lines.push(`| ${escapeTableCell(tt.category)} | ${tt.count} | ${tt.percent}% | ${example} |`);
   }
   lines.push('');
 
@@ -359,8 +363,8 @@ function renderWorkPatterns(
   lines.push('| 模式 | 频次 | 示例 |');
   lines.push('|---|---|---|');
   for (const fmp of firstMsgPatterns) {
-    const example = fmp.example ? `"${fmp.example}"` : '—';
-    lines.push(`| ${fmp.pattern} | ${fmp.count} | ${example} |`);
+    const example = fmp.example ? `"${escapeTableCell(fmp.example)}"` : '—';
+    lines.push(`| ${escapeTableCell(fmp.pattern)} | ${fmp.count} | ${example} |`);
   }
   lines.push('');
 
@@ -377,10 +381,15 @@ function renderWorkPatterns(
   return lines.join('\n');
 }
 
+function escapeTableCell(value: string): string {
+  return value.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+}
+
 function renderTechPreferences(
   techMentions: TechMention[],
   sourceSummary: string,
   existingContent?: string,
+  memoryPrefs?: MemoryTechPreference[],
 ): string {
   const { fileHeader, extractUserNotes } = rendererHelpers();
   const userNotes = extractUserNotes(existingContent);
@@ -389,7 +398,30 @@ function renderTechPreferences(
   lines.push(fileHeader('技术偏好', sourceSummary));
   lines.push('');
 
-  // Group by category
+  // Merge memory-derived preferences as a separate section at the top
+  if (memoryPrefs && memoryPrefs.length > 0) {
+    const memByCategory = new Map<string, MemoryTechPreference[]>();
+    for (const mp of memoryPrefs) {
+      if (!memByCategory.has(mp.category)) memByCategory.set(mp.category, []);
+      memByCategory.get(mp.category)!.push(mp);
+    }
+    const sortedMemoryCategories = Array.from(memByCategory.keys()).sort((a, b) => {
+      const ia = CATEGORY_ORDER.indexOf(a);
+      const ib = CATEGORY_ORDER.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+
+    for (const category of sortedMemoryCategories) {
+      const prefs = memByCategory.get(category)!;
+      lines.push(`## ${category}（记忆来源）`);
+      for (const p of prefs) {
+        lines.push(`- **${p.techName}**: ${p.description} — *[${p.sourceLabel}] ${p.sourcePath}*`);
+      }
+      lines.push('');
+    }
+  }
+
+  // Session-derived tech mentions (existing logic)
   const byCategory = new Map<string, TechMention[]>();
   for (const tm of techMentions) {
     if (!byCategory.has(tm.category)) byCategory.set(tm.category, []);
@@ -397,10 +429,9 @@ function renderTechPreferences(
   }
 
   // Sort categories in a sensible order
-  const categoryOrder = ['前端', '后端', 'AI', '工具', '部署'];
   const sortedCategories = Array.from(byCategory.keys()).sort((a, b) => {
-    const ia = categoryOrder.indexOf(a);
-    const ib = categoryOrder.indexOf(b);
+    const ia = CATEGORY_ORDER.indexOf(a);
+    const ib = CATEGORY_ORDER.indexOf(b);
     return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
   });
 

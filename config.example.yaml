@@ -41,6 +41,26 @@ layer3:
 # --- 输出 ---
 output_dir: "~/.local/share/session-memory"
 
+# --- Memory 层配置 (PRD-memory-integration §6) ---
+memory:
+  enabled: true
+
+  claude-code:
+    auto_memory: true          # ~/.claude/projects/*/memory/ 下的 AI 自动记忆
+    rules: true                # CLAUDE.md + .claude/rules/*.md
+    session_memory: false      # ~/.claude/session-memory/ — Phase 3B
+    subagent_memory: false     # .claude/agent-memory/ — Phase 3C
+    # memory_dir: "~/.claude"  # 可覆盖 Claude Code 数据根目录
+
+  opencode:
+    agents_md: false           # AGENTS.md — Phase 3B
+
+  source_labels:
+    claude-code-memory: "CC-MEM"
+    claude-code-rule: "CC-RULE"
+    opencode-memory: "OC-MEM"
+    opencode-rule: "OC-RULE"
+
 # --- 项目路径别名 (§8.4, Phase 2+) ---
 # project_aliases:
 #   - paths: ["/Users/alice/my-project", "/Users/bob/my-project"]

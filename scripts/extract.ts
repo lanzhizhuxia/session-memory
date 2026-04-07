@@ -15,6 +15,9 @@ import { NoiseFilter } from '../src/utils/noise-filter.js';
 import { runLayer1 } from '../src/extractors/layer1.js';
 import { runLayer2 } from '../src/extractors/layer2.js';
 import { runLayer3, type Decision, type PainPoint, type Preference } from '../src/extractors/layer3.js';
+import { ClaudeCodeMemoryAdapter } from '../src/memory/claude-code-memory.js';
+import { runLayer0 } from '../src/extractors/layer0.js';
+import { emptyMemorySignals, emptyMemoryTrackingState, type MemoryTrackingState } from '../src/memory/types.js';
 
 function expandHome(p: string): string {
   if (p.startsWith('~')) return path.join(os.homedir(), p.slice(1));
@@ -41,6 +44,20 @@ interface Config {
     model?: string;
     consolidation_model?: string;
   };
+  memory?: {
+    enabled?: boolean;
+    'claude-code'?: {
+      auto_memory?: boolean;
+      rules?: boolean;
+      session_memory?: boolean;
+      subagent_memory?: boolean;
+      memory_dir?: string;
+    };
+    opencode?: {
+      agents_md?: boolean;
+    };
+    source_labels?: Record<string, string>;
+  };
   output_dir?: string;
 }
 
@@ -54,6 +71,7 @@ interface LastExtraction {
     pain_points?: PainPoint[];
     preferences?: Preference[];
   };
+  memory?: MemoryTrackingState;
   stats: {
     sessions_processed: Record<string, number> & { total?: number };
     decisions_extracted: number;
@@ -61,13 +79,38 @@ interface LastExtraction {
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeLabelConfig(labels?: Record<string, string>): Record<string, string> {
+  if (labels == null) {
+    return {};
+  }
+
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(labels)) {
+    normalized[key.replace(/_/g, '-')] = value;
+  }
+  return normalized;
+}
+
 function loadConfig(): Config {
   const candidates = ['config.yaml', 'config.yml'];
   for (const name of candidates) {
     const p = path.resolve(name);
-    if (fs.existsSync(p)) {
+    if (!fs.existsSync(p)) {
+      continue;
+    }
+
+    try {
       const raw = fs.readFileSync(p, 'utf-8');
-      return parseYaml(raw) as Config;
+      const parsed = parseYaml(raw) as unknown;
+      return isRecord(parsed) ? parsed as Config : {};
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Failed to load ${p}, using defaults: ${message}`);
+      return {};
     }
   }
   console.log('No config.yaml found, using defaults.');
@@ -79,7 +122,9 @@ function loadLastExtraction(outputDir: string): LastExtraction | null {
   if (fs.existsSync(p)) {
     try {
       return JSON.parse(fs.readFileSync(p, 'utf-8'));
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Failed to load ${p}, ignoring previous state: ${message}`);
       return null;
     }
   }
@@ -94,10 +139,17 @@ function saveLastExtraction(outputDir: string, data: LastExtraction): void {
 }
 
 function readFileIfExists(filePath: string): string | undefined {
-  if (fs.existsSync(filePath)) {
-    return fs.readFileSync(filePath, 'utf-8');
+  if (!fs.existsSync(filePath)) {
+    return undefined;
   }
-  return undefined;
+
+  try {
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Failed to read ${filePath}, continuing without it: ${message}`);
+    return undefined;
+  }
 }
 
 async function main(): Promise<void> {
@@ -112,10 +164,7 @@ async function main(): Promise<void> {
 
   // Step 2: Initialize adapters
   const sourceLabels = config.source_labels ?? { opencode: 'OC', claude_code: 'CC' };
-  const normalizedLabels: Record<string, string> = {};
-  for (const [key, val] of Object.entries(sourceLabels)) {
-    normalizedLabels[key.replace(/_/g, '-')] = val;
-  }
+  const normalizedLabels = normalizeLabelConfig(sourceLabels);
 
   const registry = new AdapterRegistry(normalizedLabels);
 
@@ -168,6 +217,48 @@ async function main(): Promise<void> {
     path.join(outputDir, '.noise-report.json'),
     JSON.stringify(noiseReport, null, 2),
   );
+
+  // ============================================================
+  // Layer 0: Memory signal collection
+  // ============================================================
+  const memoryEnabled = config.memory?.enabled !== false;
+  let memorySignals = emptyMemorySignals();
+  let memoryTracking = emptyMemoryTrackingState();
+
+  if (memoryEnabled) {
+    console.log('\nLayer 0: Memory signal collection...');
+    const memoryAdapters: ClaudeCodeMemoryAdapter[] = [];
+
+    const ccMemConfig = config.memory?.['claude-code'];
+    const includeAutoMemory = ccMemConfig?.auto_memory !== false;
+    const includeRules = ccMemConfig?.rules !== false;
+    if (includeAutoMemory || includeRules) {
+      const baseDir = ccMemConfig?.memory_dir ?? config.sources?.claude_code?.base_dir;
+      memoryAdapters.push(new ClaudeCodeMemoryAdapter(baseDir, { includeAutoMemory, includeRules }));
+    }
+
+    const memorySourceLabels = normalizeLabelConfig(config.memory?.source_labels ?? {
+      'claude-code-memory': 'CC-MEM',
+      'claude-code-rule': 'CC-RULE',
+      'opencode-memory': 'OC-MEM',
+      'opencode-rule': 'OC-RULE',
+    });
+
+    if (memoryAdapters.length > 0) {
+      const layer0Result = await runLayer0(
+        memoryAdapters,
+        { enabled: true, sourceLabels: memorySourceLabels },
+        lastExtraction?.memory,
+      );
+
+      memorySignals = layer0Result.signals;
+      memoryTracking = layer0Result.tracking;
+      console.log(`  Files processed: ${layer0Result.stats.filesProcessed}, skipped: ${layer0Result.stats.filesSkipped}, warned: ${layer0Result.stats.filesWarned}`);
+      console.log(`  Signals: ${memorySignals.decisions.length} decisions, ${memorySignals.painPoints.length} pain points, ${memorySignals.workProfile.length} profile, ${memorySignals.techPreferences.length} tech prefs`);
+    } else {
+      console.log('  No memory adapters enabled.');
+    }
+  }
 
   // ============================================================
   // Layer 1: Structured extraction
@@ -230,6 +321,7 @@ async function main(): Promise<void> {
   const layer2Result = await runLayer2(
     registry, noiseFilter, mergedProjects, sourceSummary,
     existingWorkPatterns, existingTechPrefs,
+    memorySignals.techPreferences.length > 0 ? memorySignals.techPreferences : undefined,
   );
 
   fs.writeFileSync(path.join(outputDir, '工作模式.md'), layer2Result.workPatternsContent);
@@ -267,6 +359,10 @@ async function main(): Promise<void> {
       lastExtraction?.layer3?.decisions,
       lastExtraction?.layer3?.pain_points,
       lastExtraction?.layer3?.preferences,
+      memorySignals.decisions.length > 0 ? memorySignals.decisions : undefined,
+      memorySignals.painPoints.length > 0 ? memorySignals.painPoints : undefined,
+      memorySignals.workProfile.length > 0 ? memorySignals.workProfile : undefined,
+      memoryTracking.memoryHashes,
     );
 
     fs.writeFileSync(path.join(outputDir, '决策日志.md'), layer3Result.decisionsContent);
@@ -290,9 +386,12 @@ async function main(): Promise<void> {
       preferences: layer3Result.preferences,
     };
     newLastExtraction.stats.decisions_extracted = layer3Result.decisions.length;
+    newLastExtraction.memory = memoryTracking;
     saveLastExtraction(outputDir, newLastExtraction);
   } else {
     console.log('\nLayer 3: Skipped (disabled in config or no API key)');
+    newLastExtraction.memory = memoryTracking;
+    saveLastExtraction(outputDir, newLastExtraction);
   }
 
   // Summary

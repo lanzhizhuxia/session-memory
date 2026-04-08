@@ -19,7 +19,9 @@ export interface Layer3Config {
   api_key?: string;
   api_base_url?: string;
   model?: string;
-  consolidation_model?: string;  // stronger model for consolidation (e.g. sonnet)
+  long_context_model?: string;
+  consolidation_model?: string;
+  long_context_threshold?: number;
 }
 
 export interface Decision {
@@ -174,7 +176,7 @@ const DECISION_PROMPT = `你是一个技术决策提取器。只关注决策，�
 
 如果对话中没有明确决策，返回空数组。不要编造。
 
-输出 JSON：
+严格输出纯 JSON，不要加任何 markdown 格式或解释文字：
 {
   "decisions": [{ "what": "", "why": "", "alternatives": [""], "trigger": "", "date": "" }]
 }`;
@@ -189,7 +191,7 @@ const PAIN_POINT_PROMPT = `你是一个问题模式提取器。只关注遇到�
 
 如果对话中没有明确问题，返回空数组。不要编造。
 
-输出 JSON：
+严格输出纯 JSON，不要加任何 markdown 格式或解释文字：
 {
   "pain_points": [{ "problem": "", "diagnosis": "", "solution": "", "likely_recurring": false }]
 }`;
@@ -204,7 +206,7 @@ const PREFERENCE_PROMPT = `你是一个工作风格观察器。只关注用户�
 
 只记录有证据支撑的观察。不要推测。
 
-输出 JSON：
+严格输出纯 JSON，不要加任何 markdown 格式或解释文字：
 {
   "preferences": [{ "category": "", "observation": "", "evidence": "" }]
 }`;
@@ -307,13 +309,32 @@ function parseJSON<T>(text: string | null): T | null {
 
   for (const candidate of candidates) {
     try {
-      return JSON.parse(candidate) as T;
+      const parsed = JSON.parse(candidate);
+      return normalizeAIResponseKeys(parsed) as T;
     } catch {
       continue;
     }
   }
 
   return null;
+}
+
+function normalizeAIResponseKeys(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const normalized = key.replace(/[-_](\w)/g, (_, c: string) => c.toUpperCase());
+    const snaked = normalized.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
+    if (key === 'decisions' || snaked === 'decisions') {
+      result['decisions'] = value;
+    } else if (key === 'pain_points' || snaked === 'pain_points' || normalized === 'painPoints') {
+      result['pain_points'] = value;
+    } else if (key === 'preferences' || snaked === 'preferences') {
+      result['preferences'] = value;
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
 }
 
 // ============================================================
@@ -418,10 +439,16 @@ export async function runLayer3(
           const conversation = formatConversation(messages);
           const dateStr = new Date(session.timeCreated).toISOString().split('T')[0];
 
+          const charCount = conversation.length;
+          const threshold = config.long_context_threshold ?? 250000;
+          const sessionModel = charCount > threshold && config.long_context_model
+            ? config.long_context_model
+            : undefined;
+
           const [decisionRes, painRes, prefRes] = await Promise.all([
-            callAI(DECISION_PROMPT, conversation, config),
-            callAI(PAIN_POINT_PROMPT, conversation, config),
-            callAI(PREFERENCE_PROMPT, conversation, config),
+            callAI(DECISION_PROMPT, conversation, config, sessionModel),
+            callAI(PAIN_POINT_PROMPT, conversation, config, sessionModel),
+            callAI(PREFERENCE_PROMPT, conversation, config, sessionModel),
           ]);
 
           const decisionData = parseJSON<{ decisions: Array<{ what: string; why: string; alternatives: string[]; trigger: string; date: string }> }>(decisionRes);
@@ -684,14 +711,66 @@ async function consolidatePainPoints(painPoints: PainPoint[], config: Layer3Conf
 async function consolidatePreferences(preferences: Preference[], config: Layer3Config): Promise<Preference[]> {
   if (preferences.length <= 10) return preferences;
 
-  const input = preferences.map(p => ({
-    category: p.category, observation: p.observation, evidence: p.evidence,
-  }));
+  // Split into batches of ~150 to stay within context/output limits
+  const BATCH_SIZE = 150;
+  const batches: Preference[][] = [];
+  for (let i = 0; i < preferences.length; i += BATCH_SIZE) {
+    batches.push(preferences.slice(i, i + BATCH_SIZE));
+  }
 
   const cModel = config.consolidation_model;
-  const response = await callAI(CONSOLIDATE_PREFERENCES_PROMPT, JSON.stringify(input, null, 0), config, cModel, 8192);
-  const parsed = parseJSON<{ preferences: Preference[] }>(response);
-  return parsed?.preferences ?? preferences;
+  const consolidatedBatches: Preference[] = [];
+
+  for (const batch of batches) {
+    if (batch.length <= 5) {
+      consolidatedBatches.push(...batch);
+      continue;
+    }
+
+    const input = batch.map(p => ({
+      category: p.category, observation: p.observation, evidence: p.evidence,
+    }));
+
+    const response = await callAI(CONSOLIDATE_PREFERENCES_PROMPT, JSON.stringify(input, null, 0), config, cModel, 8192);
+    const parsed = parseJSON<{ preferences: Preference[] }>(response);
+    if (parsed?.preferences && parsed.preferences.length > 0) {
+      consolidatedBatches.push(...parsed.preferences);
+    } else {
+      console.warn(`  Warning: preferences consolidation failed for batch of ${batch.length}, keeping raw`);
+      consolidatedBatches.push(...batch);
+    }
+  }
+
+  // If batched consolidation produced many results, do a final merge pass
+  if (consolidatedBatches.length > 80 && consolidatedBatches.length < preferences.length) {
+    const finalInput = consolidatedBatches.map(p => ({
+      category: p.category, observation: p.observation, evidence: p.evidence,
+    }));
+
+    // Split final pass into smaller chunks too
+    const finalBatches: Preference[][] = [];
+    for (let i = 0; i < consolidatedBatches.length; i += BATCH_SIZE) {
+      finalBatches.push(consolidatedBatches.slice(i, i + BATCH_SIZE));
+    }
+
+    const finalResult: Preference[] = [];
+    for (const fb of finalBatches) {
+      if (fb.length <= 10) {
+        finalResult.push(...fb);
+        continue;
+      }
+      const resp = await callAI(CONSOLIDATE_PREFERENCES_PROMPT, JSON.stringify(fb.map(p => ({ category: p.category, observation: p.observation, evidence: p.evidence })), null, 0), config, cModel, 8192);
+      const parsed2 = parseJSON<{ preferences: Preference[] }>(resp);
+      if (parsed2?.preferences && parsed2.preferences.length > 0) {
+        finalResult.push(...parsed2.preferences);
+      } else {
+        finalResult.push(...fb);
+      }
+    }
+    return finalResult;
+  }
+
+  return consolidatedBatches;
 }
 
 // ============================================================

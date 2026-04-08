@@ -24,7 +24,9 @@ import { evaluateCandidate } from '../src/canonical/quality-gate.js';
 import { mergeIntoStore } from '../src/canonical/merge.js';
 import { CanonicalStore } from '../src/canonical/store.js';
 import { extractTechPreferenceCandidates } from '../src/canonical/extractors/tech-preference.js';
+import { extractWorkStyleCandidates } from '../src/canonical/extractors/work-style.js';
 import { TECH_PREFS_BUDGET, compileTechPreferencesView } from '../src/canonical/views/tech-preferences.js';
+import { WORK_PROFILE_BUDGET, compileWorkProfileView } from '../src/canonical/views/work-profile.js';
 import type { QuarantineRecord } from '../src/canonical/store.js';
 import type { SignalCandidate, ViewBudget } from '../src/canonical/types.js';
 
@@ -58,6 +60,8 @@ interface Config {
     api_key?: string;
     api_base_url?: string;
     model?: string;
+    long_context_model?: string;
+    long_context_threshold?: number;
     consolidation_model?: string;
   };
   memory?: {
@@ -490,6 +494,8 @@ async function main(): Promise<void> {
       api_key: config.layer3?.api_key,
       api_base_url: config.layer3?.api_base_url,
       model: config.layer3?.model,
+      long_context_model: config.layer3?.long_context_model,
+      long_context_threshold: config.layer3?.long_context_threshold,
       consolidation_model: config.layer3?.consolidation_model,
     };
 
@@ -513,8 +519,58 @@ async function main(): Promise<void> {
 
     fs.writeFileSync(path.join(outputDir, '决策日志.md'), layer3Result.decisionsContent);
     fs.writeFileSync(path.join(outputDir, '反复痛点.md'), layer3Result.painPointsContent);
-    fs.writeFileSync(path.join(outputDir, '工作画像.md'), layer3Result.workProfileContent);
-    console.log('  Written: 决策日志.md, 反复痛点.md, 工作画像.md');
+
+    if (canonicalEnabled) {
+      console.log('  Canonical work_style pipeline...');
+      const canonicalStore = new CanonicalStore(path.join(outputDir, '.state'));
+      canonicalStore.load();
+
+      const wsExtracted = extractWorkStyleCandidates(
+        layer3Result.preferences,
+        memorySignals.workProfile,
+      );
+
+      const wsEvidenceById = new Map(wsExtracted.evidence.map((e) => [e.id, e]));
+      const wsAccepted: SignalCandidate[] = [];
+      const wsQuarantined: QuarantineRecord[] = [];
+
+      for (const candidate of wsExtracted.candidates) {
+        const ev = candidate.evidenceIds
+          .map((id) => wsEvidenceById.get(id))
+          .filter((e): e is NonNullable<typeof e> => e != null);
+        const result = evaluateCandidate(candidate, ev);
+        if (result.decision === 'accept' || result.decision === 'needs_merge') {
+          wsAccepted.push(candidate);
+        } else {
+          wsQuarantined.push({ candidate, reasonCodes: result.issues.map((i) => i.code), createdAt: Date.now() });
+        }
+      }
+
+      const wsMerge = mergeIntoStore(wsAccepted, canonicalStore.getSignals('work_style'), 'work_style');
+      canonicalStore.addEvidence(wsExtracted.evidence);
+      canonicalStore.addSignals(wsMerge.signals);
+      canonicalStore.addQuarantine([...wsQuarantined, ...wsMerge.quarantined.map((c) => ({
+        candidate: c, reasonCodes: ['merge_rejected'], createdAt: Date.now(),
+      }))]);
+
+      const existingWorkProfile = readFileIfExists(path.join(outputDir, '工作画像.md'));
+      const workProfileView = compileWorkProfileView(
+        canonicalStore.getSignals('work_style'),
+        WORK_PROFILE_BUDGET,
+        sourceSummary,
+        existingWorkProfile ?? undefined,
+      );
+
+      canonicalStore.upsertPublishedView(workProfileView);
+      canonicalStore.save();
+
+      fs.writeFileSync(path.join(outputDir, '工作画像.md'), workProfileView.markdown);
+      console.log(`  Written: 工作画像.md (canonical, ${workProfileView.sourceSignalIds.length} signals)`);
+    } else {
+      fs.writeFileSync(path.join(outputDir, '工作画像.md'), layer3Result.workProfileContent);
+    }
+
+    console.log('  Written: 决策日志.md, 反复痛点.md');
     console.log(`  Decisions extracted: ${layer3Result.decisions.length}`);
     console.log(`  Pain points extracted: ${layer3Result.painPoints.length}`);
     console.log(`  Sessions processed by AI: ${layer3Result.processedSessionIds.length}`);

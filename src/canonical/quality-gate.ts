@@ -18,6 +18,10 @@ export function evaluateCandidate(candidate: SignalCandidate, evidence: Evidence
     return evaluateWorkStyle(candidate, evidence);
   }
 
+  if (candidate.kind === 'profile_fact') {
+    return evaluateProfileFact(candidate, evidence);
+  }
+
   return { candidateId: candidate.id, decision: 'accept', score: 50, issues: [] };
 }
 
@@ -258,7 +262,7 @@ export function evaluateWorkStyle(candidate: SignalCandidate, evidence: Evidence
     }
   }
 
-  const decision = issues.some((issue) => rejectCodes.has(issue.code))
+  const wsDecision = issues.some((issue) => rejectCodes.has(issue.code))
     ? 'reject'
     : issues.some((issue) => quarantineCodes.has(issue.code))
       ? 'quarantine'
@@ -268,8 +272,120 @@ export function evaluateWorkStyle(candidate: SignalCandidate, evidence: Evidence
 
   return {
     candidateId: candidate.id,
-    decision,
+    decision: wsDecision,
     score: Math.max(0, score),
+    issues,
+  };
+}
+
+const MIN_PROFILE_CLAIM_LENGTH = 8;
+const MAX_PROFILE_CLAIM_LENGTH = 100;
+const MAX_PROFILE_RATIONALE_LENGTH = 150;
+const PROJECT_EXECUTION_DETAIL_PATTERN = /^\s*(修改|添加|删除|创建|更新|新增|移除|调整)\s*(了|过)?\s*(文件|代码|配置|函数|方法|接口|组件|表|字段)/;
+const VALID_DIMENSIONS = new Set(['role', 'responsibility', 'focus_area']);
+
+export function evaluateProfileFact(candidate: SignalCandidate, evidence: EvidenceRecord[]): QualityGateResult {
+  if (candidate.kind !== 'profile_fact') {
+    return {
+      candidateId: candidate.id,
+      decision: 'reject',
+      score: 0,
+      issues: [createIssue('missing_required', 'Candidate kind must be profile_fact.')],
+    };
+  }
+
+  const issues: QualityIssue[] = [];
+  const { dimension, claim, scope, rationale } = candidate.payload;
+  const trimmedClaim = claim.trim();
+  const trimmedRationale = rationale?.trim() ?? '';
+  const normalizedRawText = candidate.rawText?.trim() ?? '';
+  const highestTrust = getHighestTrust(evidence);
+  const independentEvidenceCount = new Set(evidence.map((e) => e.id)).size;
+
+  if (!VALID_DIMENSIONS.has(dimension)) {
+    issues.push(createIssue('missing_required', `dimension must be one of: role, responsibility, focus_area. Got: "${dimension}".`));
+  }
+
+  if (trimmedClaim.length === 0) {
+    issues.push(createIssue('missing_required', 'claim is required.'));
+  }
+
+  if (trimmedClaim.length > 0 && trimmedClaim.length < MIN_PROFILE_CLAIM_LENGTH) {
+    issues.push(createIssue('too_vague', `claim is too short (${trimmedClaim.length} chars < ${MIN_PROFILE_CLAIM_LENGTH}).`));
+  }
+
+  if (trimmedClaim.length > MAX_PROFILE_CLAIM_LENGTH) {
+    issues.push(createIssue('too_long', `claim exceeds ${MAX_PROFILE_CLAIM_LENGTH} chars.`));
+  }
+
+  if (trimmedRationale.length > MAX_PROFILE_RATIONALE_LENGTH) {
+    issues.push(createIssue('echo_raw_text', `rationale exceeds ${MAX_PROFILE_RATIONALE_LENGTH} chars.`));
+  }
+
+  if (lineBreakCount(trimmedClaim) > 2 || bulletCount(trimmedClaim) > 3) {
+    issues.push(createIssue('echo_raw_text', 'claim contains raw text formatting (line breaks or bullet points).'));
+  }
+
+  if (hasMarkdownEcho(trimmedClaim)) {
+    issues.push(createIssue('echo_raw_text', 'claim contains markdown formatting — likely raw chat echo.'));
+  }
+
+  if (normalizedRawText.length > 0) {
+    const claimOverlap = overlapRatio(trimmedClaim, normalizedRawText);
+    if (normalizedRawText.length > trimmedClaim.length + 20 && claimOverlap >= 0.85) {
+      issues.push(createIssue('echo_raw_text', 'claim directly copies raw chat text.'));
+    }
+  }
+
+  if (scope === 'global' && PROJECT_EXECUTION_DETAIL_PATTERN.test(trimmedClaim)) {
+    issues.push(createIssue('no_actionability', 'global scope profile_fact must not contain project-specific execution details.'));
+  }
+
+  if (highestTrust < 4 && independentEvidenceCount < 2) {
+    issues.push(createIssue('weak_evidence', 'profile_fact requires trustScore >= 4 or at least 2 independent evidence records.'));
+  }
+
+  if (evidence.length === 0) {
+    issues.push(createIssue('weak_evidence', 'No supporting evidence records were provided.'));
+  }
+
+  const pfRejectCodes = new Set<QualityIssue['code']>(['missing_required', 'too_vague', 'no_actionability']);
+  const pfQuarantineCodes = new Set<QualityIssue['code']>(['echo_raw_text', 'too_long']);
+  const pfMergeCodes = new Set<QualityIssue['code']>(['weak_evidence']);
+  let pfScore = 100;
+
+  for (const issue of issues) {
+    switch (issue.code) {
+      case 'echo_raw_text':
+      case 'too_long':
+        pfScore -= 45;
+        break;
+      case 'too_vague':
+      case 'missing_required':
+      case 'no_actionability':
+        pfScore -= 60;
+        break;
+      case 'weak_evidence':
+        pfScore -= 20;
+        break;
+      default:
+        pfScore -= 10;
+        break;
+    }
+  }
+
+  const pfDecision = issues.some((issue) => pfRejectCodes.has(issue.code))
+    ? 'reject'
+    : issues.some((issue) => pfQuarantineCodes.has(issue.code))
+      ? 'quarantine'
+      : issues.some((issue) => pfMergeCodes.has(issue.code))
+        ? 'needs_merge'
+        : 'accept';
+
+  return {
+    candidateId: candidate.id,
+    decision: pfDecision,
+    score: Math.max(0, pfScore),
     issues,
   };
 }

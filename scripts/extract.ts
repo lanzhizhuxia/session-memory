@@ -25,6 +25,7 @@ import { mergeIntoStore } from '../src/canonical/merge.js';
 import { CanonicalStore } from '../src/canonical/store.js';
 import { extractTechPreferenceCandidates } from '../src/canonical/extractors/tech-preference.js';
 import { extractWorkStyleCandidates } from '../src/canonical/extractors/work-style.js';
+import { extractProfileFactCandidates } from '../src/canonical/extractors/profile-fact.js';
 import { TECH_PREFS_BUDGET, compileTechPreferencesView } from '../src/canonical/views/tech-preferences.js';
 import { WORK_PROFILE_BUDGET, compileWorkProfileView } from '../src/canonical/views/work-profile.js';
 import type { QuarantineRecord } from '../src/canonical/store.js';
@@ -525,6 +526,39 @@ async function main(): Promise<void> {
       const canonicalStore = new CanonicalStore(path.join(outputDir, '.state'));
       canonicalStore.load();
 
+      // Profile fact extraction (role, responsibilities, focus areas)
+      const pfExtracted = extractProfileFactCandidates(
+        layer3Result.preferences,
+        layer3Result.decisions,
+        memorySignals.workProfile,
+        memorySignals.decisions,
+      );
+
+      const pfEvidenceById = new Map(pfExtracted.evidence.map((e) => [e.id, e]));
+      const pfAccepted: SignalCandidate[] = [];
+      const pfQuarantined: QuarantineRecord[] = [];
+
+      for (const candidate of pfExtracted.candidates) {
+        const ev = candidate.evidenceIds
+          .map((id) => pfEvidenceById.get(id))
+          .filter((e): e is NonNullable<typeof e> => e != null);
+        const result = evaluateCandidate(candidate, ev);
+        if (result.decision === 'accept' || result.decision === 'needs_merge') {
+          pfAccepted.push(candidate);
+        } else {
+          pfQuarantined.push({ candidate, reasonCodes: result.issues.map((i) => i.code), createdAt: Date.now() });
+        }
+      }
+
+      const pfMerge = mergeIntoStore(pfAccepted, canonicalStore.getSignals('profile_fact'), 'profile_fact');
+      canonicalStore.addEvidence(pfExtracted.evidence);
+      canonicalStore.addSignals(pfMerge.signals);
+      canonicalStore.addQuarantine([...pfQuarantined, ...pfMerge.quarantined.map((c) => ({
+        candidate: c, reasonCodes: ['merge_rejected'], createdAt: Date.now(),
+      }))]);
+      console.log(`  Profile facts: ${pfMerge.signals.length} canonical (${pfExtracted.candidates.length} candidates, ${pfQuarantined.length} quarantined)`);
+
+      // Work style extraction
       const wsExtracted = extractWorkStyleCandidates(
         layer3Result.preferences,
         memorySignals.workProfile,
@@ -556,6 +590,8 @@ async function main(): Promise<void> {
       const existingWorkProfile = readFileIfExists(path.join(outputDir, '工作画像.md'));
       const workProfileView = compileWorkProfileView(
         canonicalStore.getSignals('work_style'),
+        canonicalStore.getSignals('profile_fact'),
+        canonicalStore.getSignals(),
         WORK_PROFILE_BUDGET,
         sourceSummary,
         existingWorkProfile ?? undefined,

@@ -2,8 +2,11 @@ import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget }
 
 const DIMENSION_ORDER = ['交互风格', '语言偏好', '技术审美', '工作节奏'];
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const PLACEHOLDER = '(待提取)';
 
 type WorkStyleSignal = Extract<CanonicalSignal, { kind: 'work_style' }>;
+type ProfileFactSignal = Extract<CanonicalSignal, { kind: 'profile_fact' }>;
 
 export const WORK_PROFILE_BUDGET: ViewBudget = {
   viewId: 'work_profile',
@@ -32,6 +35,107 @@ function sanitizeRationale(value: string): string {
 
 function isWorkStyleSignal(signal: CanonicalSignal): signal is WorkStyleSignal {
   return signal.kind === 'work_style';
+}
+
+function isProfileFactSignal(signal: CanonicalSignal): signal is ProfileFactSignal {
+  return signal.kind === 'profile_fact';
+}
+
+function sortProfileFacts(signals: ProfileFactSignal[]): ProfileFactSignal[] {
+  return [...signals].sort((left, right) => (
+    right.trustScore - left.trustScore
+    || right.supportCount - left.supportCount
+    || right.confidence - left.confidence
+    || right.lastSeenAt - left.lastSeenAt
+    || left.id.localeCompare(right.id)
+  ));
+}
+
+function pickProfileFacts(
+  signals: ProfileFactSignal[],
+  dimension: ProfileFactSignal['payload']['dimension'],
+): ProfileFactSignal[] {
+  return sortProfileFacts(
+    signals.filter((s) => s.payload.dimension === dimension && s.status === 'active'),
+  );
+}
+
+function computeActiveProjects(allSignals: CanonicalSignal[], now: number): string[] {
+  const cutoff = now - THIRTY_DAYS_MS;
+  const counts = new Map<string, number>();
+  for (const signal of allSignals) {
+    if (signal.status !== 'active' || signal.lastSeenAt < cutoff) continue;
+    for (const name of signal.projectNames) {
+      if (name.length === 0) continue;
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 5)
+    .map(([name]) => name);
+}
+
+interface CoreProfileFields {
+  role: string;
+  primaryResponsibilities: string[];
+  secondaryResponsibilities: string[];
+  focusAreas: string[];
+  activeProjects: string[];
+}
+
+function buildCoreProfileFields(
+  profileFactSignals: CanonicalSignal[],
+  allSignals: CanonicalSignal[],
+  now: number,
+): CoreProfileFields {
+  const facts = profileFactSignals.filter(isProfileFactSignal);
+  const roles = pickProfileFacts(facts, 'role');
+  const responsibilities = pickProfileFacts(facts, 'responsibility');
+  const focuses = pickProfileFacts(facts, 'focus_area');
+
+  const role = roles.length > 0 ? roles[0].payload.claim : PLACEHOLDER;
+
+  const primaryResponsibilities = responsibilities.slice(0, 2).map((s) => s.payload.claim);
+  const secondaryResponsibilities = responsibilities.slice(2, 4).map((s) => s.payload.claim);
+
+  const focusAreas = focuses.slice(0, 5).map((s) => s.payload.claim);
+
+  const activeProjects = computeActiveProjects(allSignals, now);
+
+  return { role, primaryResponsibilities, secondaryResponsibilities, focusAreas, activeProjects };
+}
+
+function renderCoreProfileSection(fields: CoreProfileFields): { markdown: string; signalIds: string[] } {
+  const lines: string[] = ['## 核心画像'];
+
+  lines.push(`- 角色: ${fields.role}`);
+
+  if (fields.primaryResponsibilities.length > 0) {
+    lines.push(`- 主要职责: ${fields.primaryResponsibilities.join('，')}`);
+  } else {
+    lines.push(`- 主要职责: ${PLACEHOLDER}`);
+  }
+
+  if (fields.secondaryResponsibilities.length > 0) {
+    lines.push(`- 副线: ${fields.secondaryResponsibilities.join('，')}`);
+  } else {
+    lines.push(`- 副线: ${PLACEHOLDER}`);
+  }
+
+  if (fields.focusAreas.length > 0) {
+    lines.push(`- 关注领域: ${fields.focusAreas.join(', ')}`);
+  } else {
+    lines.push(`- 关注领域: ${PLACEHOLDER}`);
+  }
+
+  if (fields.activeProjects.length > 0) {
+    lines.push(`- 活跃项目: ${fields.activeProjects.join(', ')}`);
+  } else {
+    lines.push(`- 活跃项目: ${PLACEHOLDER}`);
+  }
+
+  return { markdown: `${lines.join('\n')}\n`, signalIds: [] };
 }
 
 function sortSignals(signals: WorkStyleSignal[]): WorkStyleSignal[] {
@@ -82,9 +186,18 @@ function renderLine(signal: WorkStyleSignal): string {
   return `- ${claim}${rationalePart} (${signal.supportCount} 条证据, 信任度 ${signal.trustScore})`;
 }
 
-function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string): string {
+function buildMarkdown(
+  header: string,
+  coreProfileMarkdown: string,
+  sections: PublishedViewSection[],
+  userNotes: string,
+): string {
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n` : '\n';
+  const corePart = coreProfileMarkdown.length > 0 ? `\n${coreProfileMarkdown.trimEnd()}\n` : '';
+  const workStylePart = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n` : '';
+  const body = corePart.length > 0 || workStylePart.length > 0
+    ? `${corePart}${workStylePart}\n`
+    : '\n';
   return `${header}${body}${userNotes}\n`;
 }
 
@@ -93,7 +206,9 @@ function fitsBudget(markdown: string, budget: ViewBudget): boolean {
 }
 
 export function compileWorkProfileView(
-  signals: CanonicalSignal[],
+  workStyleSignals: CanonicalSignal[],
+  profileFactSignals: CanonicalSignal[],
+  allSignals: CanonicalSignal[],
   budget: ViewBudget,
   sourceSummary: string,
   existingContent?: string,
@@ -102,8 +217,14 @@ export function compileWorkProfileView(
   const now = new Date(generatedAt);
   const header = fileHeader('工作画像', sourceSummary, now);
 
+  const coreFields = buildCoreProfileFields(profileFactSignals, allSignals, generatedAt);
+  const coreSection = renderCoreProfileSection(coreFields);
+
+  const profileFacts = profileFactSignals.filter(isProfileFactSignal).filter((s) => s.status === 'active');
+  const coreProfileSignalIds: string[] = profileFacts.map((s) => s.id);
+
   const filteredSignals = sortSignals(
-    signals.filter((signal) => signal.status === 'active').filter(isWorkStyleSignal),
+    workStyleSignals.filter((signal) => signal.status === 'active').filter(isWorkStyleSignal),
   );
 
   const grouped = new Map<string, WorkStyleSignal[]>();
@@ -167,7 +288,7 @@ export function compileWorkProfileView(
         ...sections,
         { title: dimension, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
       ];
-      const candidateMarkdown = buildMarkdown(header, candidateSections, userNotes);
+      const candidateMarkdown = buildMarkdown(header, coreSection.markdown, candidateSections, userNotes);
       if (!fitsBudget(candidateMarkdown, budget)) {
         droppedSignalIds.push(signal.id);
         droppedReasons.push('over_char_budget');
@@ -196,18 +317,18 @@ export function compileWorkProfileView(
   }
 
   let finalSections = [...sections];
-  let finalSignalIds = Array.from(new Set(sourceSignalIds));
-  let markdown = buildMarkdown(header, finalSections, userNotes);
+  let finalSignalIds = Array.from(new Set([...coreProfileSignalIds, ...sourceSignalIds]));
+  let markdown = buildMarkdown(header, coreSection.markdown, finalSections, userNotes);
 
   while (finalSections.length > 0 && !fitsBudget(markdown, budget)) {
     const removed = finalSections.pop();
     const removedIds = new Set(removed?.signalIds ?? []);
     finalSignalIds = finalSignalIds.filter((id) => !removedIds.has(id));
-    markdown = buildMarkdown(header, finalSections, userNotes);
+    markdown = buildMarkdown(header, coreSection.markdown, finalSections, userNotes);
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES);
+    markdown = buildMarkdown(header, coreSection.markdown, [], DEFAULT_USER_NOTES);
     finalSignalIds = [];
   }
 
@@ -222,13 +343,19 @@ export function compileWorkProfileView(
     ? finalizedMarkdown
     : finalizedMarkdown.slice(0, budget.maxChars);
 
+  const coreProfilePublishedSection: PublishedViewSection = {
+    title: '核心画像',
+    signalIds: coreProfileSignalIds,
+    markdown: coreSection.markdown,
+  };
+
   return {
     viewId: budget.viewId,
     title: '工作画像',
     generatedAt,
     sourceSignalIds: finalSignalIds,
     budget,
-    sections: finalSections,
+    sections: [coreProfilePublishedSection, ...finalSections],
     markdown: boundedMarkdown,
   };
 }

@@ -10,6 +10,7 @@ import {
   buildTimelineData,
   renderTimeline,
   renderOpenThreads,
+  type TimelineData,
   type TodoWithContext,
 } from '../utils/renderer.js';
 
@@ -18,6 +19,8 @@ export interface Layer1Result {
   openThreadsContent: string;
   sessionsByProject: Map<string, Session[]>;
   latestSessionTime: Record<string, number>;  // per source
+  timelineData: TimelineData;
+  todoWithContext: TodoWithContext[];
 }
 
 export async function runLayer1(
@@ -115,5 +118,7 @@ export async function runLayer1(
     openThreadsContent,
     sessionsByProject,
     latestSessionTime,
+    timelineData,
+    todoWithContext,
   };
 }

@@ -62,7 +62,7 @@ function formatChurn(session: Session): string {
 // project-timeline.md — PRD §6.1.2 (append-type)
 // ============================================================
 
-interface TimelineData {
+export interface TimelineData {
   projects: Array<{
     name: string;
     days: Array<{

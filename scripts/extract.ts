@@ -28,12 +28,17 @@ import { extractWorkStyleCandidates } from '../src/canonical/extractors/work-sty
 import { extractProfileFactCandidates } from '../src/canonical/extractors/profile-fact.js';
 import { extractDecisionCandidates } from '../src/canonical/extractors/decision.js';
 import { extractPainPointCandidates } from '../src/canonical/extractors/pain-point.js';
+import { extractTimelineCandidates } from '../src/canonical/extractors/timeline.js';
+import { extractOpenThreadCandidates } from '../src/canonical/extractors/open-thread.js';
 import { TECH_PREFS_BUDGET, compileTechPreferencesView } from '../src/canonical/views/tech-preferences.js';
 import { WORK_PROFILE_BUDGET, compileWorkProfileView } from '../src/canonical/views/work-profile.js';
 import { DECISIONS_BUDGET, compileDecisionsView } from '../src/canonical/views/decisions.js';
 import { PAIN_POINTS_BUDGET, compilePainPointsView } from '../src/canonical/views/pain-points.js';
+import { TIMELINE_BUDGET, compileTimelineView } from '../src/canonical/views/timeline.js';
+import { OPEN_THREADS_BUDGET, compileOpenThreadsView } from '../src/canonical/views/open-threads.js';
+import { WEEKLY_FOCUS_BUDGET, compileWeeklyFocusView } from '../src/canonical/views/weekly-focus.js';
 import type { QuarantineRecord } from '../src/canonical/store.js';
-import type { SignalCandidate, ViewBudget, EvidenceRecord } from '../src/canonical/types.js';
+import type { SignalCandidate, SignalKind, ViewBudget, EvidenceRecord } from '../src/canonical/types.js';
 
 interface CanonicalTechSession extends Session {
   canonicalProjectPath?: string;
@@ -352,10 +357,6 @@ async function main(): Promise<void> {
     existingTimeline, existingOpenThreads,
   );
 
-  fs.writeFileSync(path.join(outputDir, '项目时间线.md'), layer1Result.timelineContent);
-  fs.writeFileSync(path.join(outputDir, '未完成线索.md'), layer1Result.openThreadsContent);
-  console.log('  Written: 项目时间线.md, 未完成线索.md');
-
   // Count stats
   let totalSessionsProcessed = 0;
   const sessionsPerSource: Record<string, number> = {};
@@ -364,6 +365,61 @@ async function main(): Promise<void> {
       sessionsPerSource[s.source] = (sessionsPerSource[s.source] ?? 0) + 1;
       totalSessionsProcessed++;
     }
+  }
+
+  // Write Layer 1 outputs (canonical or legacy)
+  const canonicalEnabled = config.canonical?.enabled !== false;
+
+  if (canonicalEnabled) {
+    console.log('  Canonical timeline + open_thread pipeline...');
+    const canonicalStore = new CanonicalStore(path.join(outputDir, '.state'));
+    canonicalStore.load();
+    const sourceSummaryL1 = await registry.getSourceSummary();
+
+    const runCanonicalPipelineL1 = (extracted: { candidates: SignalCandidate[]; evidence: EvidenceRecord[] }, kind: SignalKind) => {
+      const evidenceById = new Map(extracted.evidence.map((e) => [e.id, e]));
+      const accepted: SignalCandidate[] = [];
+      const quarantined: QuarantineRecord[] = [];
+      for (const candidate of extracted.candidates) {
+        const ev = candidate.evidenceIds
+          .map((id) => evidenceById.get(id))
+          .filter((e): e is NonNullable<typeof e> => e != null);
+        const result = evaluateCandidate(candidate, ev);
+        if (result.decision === 'accept' || result.decision === 'needs_merge') {
+          accepted.push(candidate);
+        } else {
+          quarantined.push({ candidate, reasonCodes: result.issues.map((i) => i.code), createdAt: Date.now() });
+        }
+      }
+      const merge = mergeIntoStore(accepted, canonicalStore.getSignals(kind), kind);
+      canonicalStore.addEvidence(extracted.evidence);
+      canonicalStore.addSignals(merge.signals);
+      canonicalStore.addQuarantine([...quarantined, ...merge.quarantined.map((c) => ({
+        candidate: c, reasonCodes: ['merge_rejected'], createdAt: Date.now(),
+      }))]);
+      return { accepted: accepted.length, quarantined: quarantined.length, signals: merge.signals.length, candidates: extracted.candidates.length };
+    };
+
+    const tlExtracted = extractTimelineCandidates(layer1Result.timelineData);
+    const tlStats = runCanonicalPipelineL1(tlExtracted, 'timeline_event');
+    console.log(`  Timeline events: ${tlStats.signals} canonical (${tlStats.candidates} candidates, ${tlStats.quarantined} quarantined)`);
+
+    const otExtracted = extractOpenThreadCandidates(layer1Result.todoWithContext);
+    const otStats = runCanonicalPipelineL1(otExtracted, 'open_thread');
+    console.log(`  Open threads: ${otStats.signals} canonical (${otStats.candidates} candidates, ${otStats.quarantined} quarantined)`);
+
+    const openThreadsView = compileOpenThreadsView(
+      canonicalStore.getSignals('open_thread'), OPEN_THREADS_BUDGET, sourceSummaryL1, existingOpenThreads,
+    );
+    fs.writeFileSync(path.join(outputDir, '未完成线索.md'), openThreadsView.markdown);
+    canonicalStore.upsertPublishedView(openThreadsView);
+    console.log(`  Written: 未完成线索.md (canonical, ${openThreadsView.sourceSignalIds.length} signals)`);
+
+    canonicalStore.save();
+  } else {
+    fs.writeFileSync(path.join(outputDir, '项目时间线.md'), layer1Result.timelineContent);
+    fs.writeFileSync(path.join(outputDir, '未完成线索.md'), layer1Result.openThreadsContent);
+    console.log('  Written: 项目时间线.md, 未完成线索.md (legacy)');
   }
 
   // Save Layer 1 checkpoint
@@ -407,7 +463,6 @@ async function main(): Promise<void> {
   console.log(`  Task types: ${layer2Result.taskTypes.length} categories`);
   console.log(`  Tech mentions: ${layer2Result.techMentions.length} technologies detected`);
 
-  const canonicalEnabled = config.canonical?.enabled !== false;
   if (canonicalEnabled) {
     console.log('  Canonical tech_preference pipeline...');
 
@@ -527,7 +582,7 @@ async function main(): Promise<void> {
       const canonicalStore = new CanonicalStore(path.join(outputDir, '.state'));
       canonicalStore.load();
 
-      const runCanonicalPipeline = (extracted: { candidates: SignalCandidate[]; evidence: EvidenceRecord[] }, kind: string) => {
+      const runCanonicalPipeline = (extracted: { candidates: SignalCandidate[]; evidence: EvidenceRecord[] }, kind: SignalKind) => {
         const evidenceById = new Map(extracted.evidence.map((e) => [e.id, e]));
         const accepted: SignalCandidate[] = [];
         const quarantined: QuarantineRecord[] = [];
@@ -542,7 +597,7 @@ async function main(): Promise<void> {
             quarantined.push({ candidate, reasonCodes: result.issues.map((i) => i.code), createdAt: Date.now() });
           }
         }
-        const merge = mergeIntoStore(accepted, canonicalStore.getSignals(kind as any), kind as any);
+        const merge = mergeIntoStore(accepted, canonicalStore.getSignals(kind), kind);
         canonicalStore.addEvidence(extracted.evidence);
         canonicalStore.addSignals(merge.signals);
         canonicalStore.addQuarantine([...quarantined, ...merge.quarantined.map((c) => ({
@@ -625,6 +680,33 @@ async function main(): Promise<void> {
     console.log('\nLayer 3: Skipped (disabled in config or no API key)');
     newLastExtraction.memory = memoryTracking;
     saveLastExtraction(outputDir, newLastExtraction);
+  }
+
+  // ============================================================
+  // Final views: timeline (needs cross-signal desc) + weekly focus
+  // ============================================================
+  if (canonicalEnabled) {
+    console.log('\nFinal views: timeline + weekly focus...');
+    const canonicalStore = new CanonicalStore(path.join(outputDir, '.state'));
+    canonicalStore.load();
+    const sourceSummaryFinal = await registry.getSourceSummary();
+
+    const timelineView = compileTimelineView(
+      canonicalStore.getSignals('timeline_event'), canonicalStore.getSignals(),
+      TIMELINE_BUDGET, sourceSummaryFinal, existingTimeline,
+    );
+    fs.writeFileSync(path.join(outputDir, '项目时间线.md'), timelineView.markdown);
+    canonicalStore.upsertPublishedView(timelineView);
+    console.log(`  Written: 项目时间线.md (canonical, ${timelineView.sourceSignalIds.length} signals)`);
+
+    const weeklyFocusView = compileWeeklyFocusView(
+      canonicalStore.getSignals(), WEEKLY_FOCUS_BUDGET, sourceSummaryFinal,
+    );
+    fs.writeFileSync(path.join(outputDir, '本周重点.md'), weeklyFocusView.markdown);
+    canonicalStore.upsertPublishedView(weeklyFocusView);
+    console.log(`  Written: 本周重点.md (canonical, ${weeklyFocusView.sourceSignalIds.length} signals)`);
+
+    canonicalStore.save();
   }
 
   // Summary

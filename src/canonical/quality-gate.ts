@@ -30,7 +30,16 @@ export function evaluateCandidate(candidate: SignalCandidate, evidence: Evidence
     return evaluatePainPoint(candidate, evidence);
   }
 
-  return { candidateId: candidate.id, decision: 'accept', score: 50, issues: [] };
+  if (candidate.kind === 'timeline_event') {
+    return evaluateTimelineEvent(candidate, evidence);
+  }
+
+  if (candidate.kind === 'open_thread') {
+    return evaluateOpenThread(candidate, evidence);
+  }
+
+  const _exhaustive: never = candidate;
+  return { candidateId: (_exhaustive as SignalCandidate).id, decision: 'accept', score: 50, issues: [] };
 }
 
 function lineBreakCount(value: string): number {
@@ -610,6 +619,131 @@ export function evaluatePainPoint(candidate: SignalCandidate, evidence: Evidence
     candidateId: candidate.id,
     decision: ppDecision,
     score: Math.max(0, ppScore),
+    issues,
+  };
+}
+
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const VAGUE_THREAD_TITLE_PATTERN = /^(继续处理|看一下|处理一下|弄一下)$/;
+
+export function evaluateTimelineEvent(candidate: SignalCandidate, evidence: EvidenceRecord[]): QualityGateResult {
+  if (candidate.kind !== 'timeline_event') {
+    return {
+      candidateId: candidate.id,
+      decision: 'reject',
+      score: 0,
+      issues: [createIssue('missing_required', 'Candidate kind must be timeline_event.')],
+    };
+  }
+
+  const issues: QualityIssue[] = [];
+  const { title, date } = candidate.payload;
+  const trimmedTitle = title.trim();
+
+  if (trimmedTitle.length === 0) {
+    issues.push(createIssue('missing_required', 'title must not be empty.'));
+  }
+
+  if (!ISO_DATE_PATTERN.test(date) || Number.isNaN(Date.parse(date))) {
+    issues.push(createIssue('invalid_date', `date is not a valid YYYY-MM-DD string: "${date}".`));
+  }
+
+  if (evidence.length === 0) {
+    issues.push(createIssue('weak_evidence', 'No supporting evidence records were provided.'));
+  }
+
+  const teRejectCodes = new Set<QualityIssue['code']>(['missing_required', 'invalid_date']);
+  const teMergeCodes = new Set<QualityIssue['code']>(['weak_evidence']);
+  let teScore = 100;
+
+  for (const issue of issues) {
+    switch (issue.code) {
+      case 'missing_required':
+      case 'invalid_date':
+        teScore -= 60;
+        break;
+      case 'weak_evidence':
+        teScore -= 20;
+        break;
+      default:
+        teScore -= 10;
+        break;
+    }
+  }
+
+  const teDecision = issues.some((issue) => teRejectCodes.has(issue.code))
+    ? 'reject'
+    : issues.some((issue) => teMergeCodes.has(issue.code))
+      ? 'needs_merge'
+      : 'accept';
+
+  return {
+    candidateId: candidate.id,
+    decision: teDecision,
+    score: Math.max(0, teScore),
+    issues,
+  };
+}
+
+export function evaluateOpenThread(candidate: SignalCandidate, evidence: EvidenceRecord[]): QualityGateResult {
+  if (candidate.kind !== 'open_thread') {
+    return {
+      candidateId: candidate.id,
+      decision: 'reject',
+      score: 0,
+      issues: [createIssue('missing_required', 'Candidate kind must be open_thread.')],
+    };
+  }
+
+  const issues: QualityIssue[] = [];
+  const { title, status } = candidate.payload;
+  const trimmedTitle = title.trim();
+
+  if (trimmedTitle.length === 0) {
+    issues.push(createIssue('missing_required', 'title must not be empty.'));
+  }
+
+  if (VAGUE_THREAD_TITLE_PATTERN.test(trimmedTitle)) {
+    issues.push(createIssue('too_vague', `title is not actionable: "${trimmedTitle}".`));
+  }
+
+  if (status !== 'open' && status !== 'in_progress') {
+    issues.push(createIssue('missing_required', `status must be open or in_progress, got: "${status}".`));
+  }
+
+  if (evidence.length === 0) {
+    issues.push(createIssue('weak_evidence', 'No supporting evidence records were provided.'));
+  }
+
+  const otRejectCodes = new Set<QualityIssue['code']>(['missing_required', 'too_vague']);
+  const otMergeCodes = new Set<QualityIssue['code']>(['weak_evidence']);
+  let otScore = 100;
+
+  for (const issue of issues) {
+    switch (issue.code) {
+      case 'missing_required':
+      case 'too_vague':
+        otScore -= 60;
+        break;
+      case 'weak_evidence':
+        otScore -= 20;
+        break;
+      default:
+        otScore -= 10;
+        break;
+    }
+  }
+
+  const otDecision = issues.some((issue) => otRejectCodes.has(issue.code))
+    ? 'reject'
+    : issues.some((issue) => otMergeCodes.has(issue.code))
+      ? 'needs_merge'
+      : 'accept';
+
+  return {
+    candidateId: candidate.id,
+    decision: otDecision,
+    score: Math.max(0, otScore),
     issues,
   };
 }

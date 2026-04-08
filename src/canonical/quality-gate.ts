@@ -1,4 +1,5 @@
 import type { EvidenceRecord, QualityGateResult, QualityIssue, SignalCandidate } from './types.js';
+import { isMetaCommentary } from './extractors/decision.js';
 import { normalize } from './types.js';
 
 const MAX_TECH_NAME_LENGTH = 60;
@@ -440,6 +441,10 @@ export function evaluateDecision(candidate: SignalCandidate, evidence: EvidenceR
     issues.push(createIssue('missing_required', 'decision must not be empty.'));
   }
 
+  if (isMetaCommentary(trimmedDecision) || isMetaCommentary(trimmedRationale)) {
+    issues.push(createIssue('meta_commentary', 'decision/rationale is extractor meta-commentary, not a real decision.'));
+  }
+
   if (DECISION_REJECT_TITLE_PATTERN.test(trimmedDecision)) {
     issues.push(createIssue('no_actionability', `decision is a status word, not a real decision: "${trimmedDecision}".`));
   }
@@ -479,7 +484,7 @@ export function evaluateDecision(candidate: SignalCandidate, evidence: EvidenceR
     issues.push(createIssue('weak_evidence', 'No supporting evidence records were provided.'));
   }
 
-  const dRejectCodes = new Set<QualityIssue['code']>(['missing_required', 'too_vague', 'missing_rationale', 'no_actionability']);
+  const dRejectCodes = new Set<QualityIssue['code']>(['missing_required', 'too_vague', 'missing_rationale', 'no_actionability', 'meta_commentary']);
   const dQuarantineCodes = new Set<QualityIssue['code']>(['echo_raw_text', 'too_long']);
   const dMergeCodes = new Set<QualityIssue['code']>(['weak_evidence']);
   let dScore = 100;
@@ -494,6 +499,7 @@ export function evaluateDecision(candidate: SignalCandidate, evidence: EvidenceR
       case 'missing_required':
       case 'missing_rationale':
       case 'no_actionability':
+      case 'meta_commentary':
         dScore -= 60;
         break;
       case 'weak_evidence':

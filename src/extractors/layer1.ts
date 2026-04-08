@@ -27,7 +27,7 @@ export async function runLayer1(
   registry: AdapterRegistry,
   noiseFilter: NoiseFilter,
   mergedProjects: MergedProject[],
-  since?: Record<string, number>,   // per-source last_session_time
+  since?: Record<string, number>,
   existingTimeline?: string,
   existingOpenThreads?: string,
 ): Promise<Layer1Result> {
@@ -42,19 +42,12 @@ export async function runLayer1(
     const sessions = await registry.getSessions(mp);
     if (sessions.length === 0) continue;
 
-    // Filter by since (per-source incremental)
-    const filtered = sessions.filter(s => {
-      const sourceSince = since?.[s.source];
-      return sourceSince == null || s.timeCreated > sourceSince;
-    });
+    void since;
 
-    // For timeline we only use new sessions (append-type)
-    // But for open-threads we need all sessions (aggregate-type)
-    sessionsByProject.set(mp.path, filtered);
+    sessionsByProject.set(mp.path, sessions);
     projectNames.set(mp.path, mp.name);
 
-    // Track latest session time per source
-    for (const s of filtered) {
+    for (const s of sessions) {
       if (!latestSessionTime[s.source] || s.timeCreated > latestSessionTime[s.source]) {
         latestSessionTime[s.source] = s.timeCreated;
       }

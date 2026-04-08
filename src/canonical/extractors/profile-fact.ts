@@ -18,6 +18,12 @@ export interface ProfileFactAIConfig {
   model: string;
 }
 
+export interface ProfileFactAIContext {
+  projectNames: string[];
+  decisionTopics: string[];
+  focusAreaHits: Map<string, number>;
+}
+
 // ============================================================
 // Constants
 // ============================================================
@@ -43,6 +49,7 @@ const PROJECT_DESCRIPTION_PATTERN = /这个项目|本项目|项目的核心价�
 const LONG_SENTENCE_PATTERN = /[。！？；]/;
 const ROLE_SENTENCE_NOISE_PATTERN = /的|是|在|了|等/;
 const FOCUS_LEAD_IN_PATTERN = /^涉及.{8,}/;
+const ROLE_TASK_VERB_PATTERN = /验证|修复|处理|跟进|推进|上线/;
 
 const FOCUS_DOMAIN_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
   { label: 'DeFi 套利', pattern: /DeFi|套利|arbitrage|对冲/i },
@@ -103,7 +110,7 @@ function isClearRoleTitle(claim: string): boolean {
   return true;
 }
 
-function extractFocusDomainLabels(text: string): string[] {
+export function extractFocusDomainLabels(text: string): string[] {
   const labels: string[] = [];
   for (const domain of FOCUS_DOMAIN_PATTERNS) {
     if (domain.pattern.test(text)) {
@@ -135,6 +142,47 @@ function inferResponsibilityTheme(project: string, texts: string[]): string | nu
 
 function buildEvidenceId(prefix: string, stableKey: string): string {
   return computeContentHash(`${prefix}:${stableKey}`);
+}
+
+function normalizeProjectToken(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, '').trim();
+}
+
+function containsProjectName(text: string, projectNames: string[]): boolean {
+  const normalizedText = normalizeProjectToken(text);
+  if (normalizedText.length === 0) return false;
+
+  return projectNames.some((projectName) => {
+    const normalizedProject = normalizeProjectToken(projectName);
+    return normalizedProject.length >= 3 && normalizedText.includes(normalizedProject);
+  });
+}
+
+function formatFocusAreaHits(focusAreaHits: Map<string, number>): string {
+  const items = [...focusAreaHits.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, 8)
+    .map(([label, count]) => `${label}(${count}次)`);
+  return items.length > 0 ? items.join('，') : '(none)';
+}
+
+function buildProfileAIUserInput(
+  observations: string[],
+  context: ProfileFactAIContext,
+): string {
+  const lines = [
+    '你正在分析一个人的长期工作画像。根据以下信息，推断此人的稳定职业身份。',
+    '',
+    '工作记录摘要（过去 6-12 个月）：',
+    `- 活跃项目：${context.projectNames.length > 0 ? context.projectNames.join(', ') : '(none)'}`,
+    `- 主要决策主题：${context.decisionTopics.length > 0 ? context.decisionTopics.join('，') : '(none)'}`,
+    `- 领域分布：${formatFocusAreaHits(context.focusAreaHits)}`,
+    '',
+    '用户记忆文件中的观察：',
+    ...observations.map((observation, index) => `${index + 1}. ${observation}`),
+  ];
+
+  return lines.join('\n');
 }
 
 function buildCandidateFromPayload(
@@ -590,17 +638,19 @@ Extract a structured profile from these observations. Output ONLY valid JSON, no
 
 Schema:
 {
-  "role": "one job title, max 15 chars, e.g. 产品经理, 量化开发者",
-  "responsibilities": ["2-3 items, each max 30 chars, e.g. 保证金方案设计与推动"],
-  "focus_areas": ["3-5 short domain labels, each max 10 chars, e.g. DeFi 套利, RWA, AI Agent"]
+  "role": "stable 6-12 month professional role, max 20 chars",
+  "responsibilities": ["2-3 recurring responsibilities, each max 30 chars"],
+  "focus_areas": ["3-5 short domain labels, each max 15 chars"]
 }
 
 Rules:
-- role must be a job title, NOT a project description or sentence
-- responsibilities must be verb+noun phrases about what the person DOES
+- role must be a stable professional identity over 6-12 months, NOT a current task, project description, or one-off goal
+- responsibilities must describe recurring responsibilities, NOT this week's concrete tasks
+- do not mention concrete project names in role or responsibilities
+- do not use execution-task verbs such as 验证, 修复, 处理, 跟进, 推进, 上线 in role
 - focus_areas must be short domain labels, NOT sentences
-- Infer from the evidence, do not copy-paste raw text
-- If unclear, omit the field rather than guess`;
+- infer from the combined context and observations, do not copy-paste raw text
+- if evidence is insufficient, omit the field instead of guessing`;
 
 interface AIProfileResult {
   role?: string;
@@ -614,8 +664,9 @@ const AI_RETRY_BASE_MS = 1000;
 async function callProfileAI(
   observations: string[],
   config: ProfileFactAIConfig,
+  context: ProfileFactAIContext,
 ): Promise<AIProfileResult | null> {
-  const input = observations.map((obs, i) => `${i + 1}. ${obs}`).join('\n');
+  const input = buildProfileAIUserInput(observations, context);
 
   for (let attempt = 0; attempt <= MAX_AI_RETRIES; attempt++) {
     try {
@@ -669,15 +720,20 @@ async function callProfileAI(
   return null;
 }
 
-function isValidRole(role: string): boolean {
+function isValidRole(role: string, projectNames: string[]): boolean {
   if (role.length === 0 || role.length > 20) return false;
   if (LONG_SENTENCE_PATTERN.test(role)) return false;
   if (PROJECT_DESCRIPTION_PATTERN.test(role)) return false;
+  if (ROLE_TASK_VERB_PATTERN.test(role)) return false;
+  if (containsProjectName(role, projectNames)) return false;
   return true;
 }
 
-function isValidResponsibility(resp: string): boolean {
-  return resp.length > 0 && resp.length <= 40 && !LONG_SENTENCE_PATTERN.test(resp);
+function isValidResponsibility(resp: string, projectNames: string[]): boolean {
+  return resp.length > 0
+    && resp.length <= 30
+    && !LONG_SENTENCE_PATTERN.test(resp)
+    && !containsProjectName(resp, projectNames);
 }
 
 function isValidFocusArea(area: string): boolean {
@@ -687,6 +743,7 @@ function isValidFocusArea(area: string): boolean {
 async function extractProfileFactsWithAI(
   memoryProfileEntries: MemoryProfileEntry[],
   config: ProfileFactAIConfig,
+  context: ProfileFactAIContext,
 ): Promise<{ candidates: SignalCandidate[]; evidence: EvidenceRecord[] }> {
   const candidates: SignalCandidate[] = [];
   const evidence: EvidenceRecord[] = [];
@@ -697,7 +754,7 @@ async function extractProfileFactsWithAI(
 
   if (observations.length === 0) return { candidates, evidence };
 
-  const result = await callProfileAI(observations, config);
+  const result = await callProfileAI(observations, config, context);
   if (result == null) return { candidates, evidence };
 
   const evidenceId = buildEvidenceId('ai-profile-semantic', observations.join('|'));
@@ -714,7 +771,7 @@ async function extractProfileFactsWithAI(
   };
   evidence.push(evidenceRecord);
 
-  if (result.role != null && isValidRole(result.role)) {
+  if (result.role != null && isValidRole(result.role, context.projectNames)) {
     const payload: ProfileFactPayload = {
       dimension: 'role',
       claim: clamp(result.role, MAX_CLAIM_CHARS),
@@ -725,7 +782,7 @@ async function extractProfileFactsWithAI(
 
   if (result.responsibilities != null) {
     for (const resp of result.responsibilities.slice(0, 3)) {
-      if (!isValidResponsibility(resp)) continue;
+      if (!isValidResponsibility(resp, context.projectNames)) continue;
       const payload: ProfileFactPayload = {
         dimension: 'responsibility',
         claim: clamp(resp, MAX_CLAIM_CHARS),
@@ -760,10 +817,11 @@ export async function extractProfileFactCandidates(
   memoryProfileEntries: MemoryProfileEntry[],
   memoryDecisions: MemoryDecision[],
   aiConfig?: ProfileFactAIConfig,
+  aiContext: ProfileFactAIContext = { projectNames: [], decisionTopics: [], focusAreaHits: new Map() },
 ): Promise<{ candidates: SignalCandidate[]; evidence: EvidenceRecord[] }> {
   // AI-backed semantic extraction (replaces regex-based memory extraction when available)
   const aiProfileFacts = aiConfig != null
-    ? await extractProfileFactsWithAI(memoryProfileEntries, aiConfig)
+    ? await extractProfileFactsWithAI(memoryProfileEntries, aiConfig, aiContext)
     : { candidates: [] as SignalCandidate[], evidence: [] as EvidenceRecord[] };
   const hasAIResults = aiProfileFacts.candidates.length > 0;
 

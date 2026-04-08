@@ -133,6 +133,7 @@ export interface QualityIssue {
     | 'weak_evidence'
     | 'single_occurrence_low_trust'
     | 'no_actionability'
+    | 'meta_commentary'
     | 'invalid_date';
   message: string;
 }

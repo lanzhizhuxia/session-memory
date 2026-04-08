@@ -25,11 +25,17 @@ import { mergeIntoStore } from '../src/canonical/merge.js';
 import { CanonicalStore } from '../src/canonical/store.js';
 import { extractTechPreferenceCandidates } from '../src/canonical/extractors/tech-preference.js';
 import { extractWorkStyleCandidates } from '../src/canonical/extractors/work-style.js';
-import { extractProfileFactCandidates, type ProfileFactAIConfig } from '../src/canonical/extractors/profile-fact.js';
+import {
+  extractFocusDomainLabels,
+  extractProfileFactCandidates,
+  type ProfileFactAIConfig,
+  type ProfileFactAIContext,
+} from '../src/canonical/extractors/profile-fact.js';
 import { extractDecisionCandidates } from '../src/canonical/extractors/decision.js';
 import { extractPainPointCandidates } from '../src/canonical/extractors/pain-point.js';
 import { extractTimelineCandidates } from '../src/canonical/extractors/timeline.js';
 import { extractOpenThreadCandidates } from '../src/canonical/extractors/open-thread.js';
+import { generateProjectDescriptions } from '../src/canonical/extractors/project-summary.js';
 import { TECH_PREFS_BUDGET, compileTechPreferencesView } from '../src/canonical/views/tech-preferences.js';
 import { WORK_PROFILE_BUDGET, compileWorkProfileView } from '../src/canonical/views/work-profile.js';
 import { DECISIONS_BUDGET, compileDecisionsView } from '../src/canonical/views/decisions.js';
@@ -263,6 +269,100 @@ function runCanonicalPipeline(
   return { accepted: accepted.length, quarantined: quarantined.length, signals: merge.signals.length, candidates: extracted.candidates.length };
 }
 
+function canonicalStateLooksInconsistent(outputDir: string, hasLastExtraction: boolean): boolean {
+  const stateDir = path.join(outputDir, '.state');
+  const hasState = fs.existsSync(stateDir)
+    && fs.existsSync(path.join(stateDir, 'signals.json'));
+  return hasState !== hasLastExtraction;
+}
+
+function buildProfileFactAIContext(store: CanonicalStore): ProfileFactAIContext {
+  const activeSignals = store.getSignals().filter((signal) => signal.status === 'active');
+
+  const projectNames = [...new Set(
+    activeSignals
+      .flatMap((signal) => signal.projectNames)
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0),
+  )]
+    .sort((left, right) => left.localeCompare(right))
+    .slice(0, 5);
+
+  const decisionTopics = activeSignals
+    .filter((signal): signal is Extract<typeof signal, { kind: 'decision' }> => signal.kind === 'decision')
+    .map((signal) => ({ topic: signal.payload.topic.trim(), supportCount: signal.supportCount, trustScore: signal.trustScore }))
+    .filter((entry) => entry.topic.length > 0)
+    .sort((left, right) => right.supportCount - left.supportCount || right.trustScore - left.trustScore || left.topic.localeCompare(right.topic))
+    .slice(0, 10)
+    .map((entry) => entry.topic);
+
+  const focusAreaHits = new Map<string, number>();
+  for (const signal of activeSignals) {
+    if (signal.kind === 'profile_fact' && signal.payload.dimension === 'focus_area') {
+      const label = signal.payload.claim.trim();
+      if (label.length > 0) {
+        focusAreaHits.set(label, (focusAreaHits.get(label) ?? 0) + signal.supportCount);
+      }
+    }
+
+    if (signal.kind === 'decision') {
+      const texts = [signal.payload.topic, signal.payload.decision, signal.payload.rationale];
+      for (const text of texts) {
+        for (const label of extractFocusDomainLabels(text)) {
+          focusAreaHits.set(label, (focusAreaHits.get(label) ?? 0) + 1);
+        }
+      }
+    }
+  }
+
+  return { projectNames, decisionTopics, focusAreaHits };
+}
+
+function buildProjectSummaryContexts(store: CanonicalStore): Array<{
+  projectName: string;
+  signalCount: number;
+  timelineTitles: string[];
+  decisionTopics: string[];
+  openThreadTitles: string[];
+}> {
+  const activeSignals = store.getSignals().filter((signal) => signal.status === 'active');
+  const projectNames = [...new Set(
+    activeSignals.flatMap((signal) => signal.projectNames).filter((name) => name.trim().length > 0),
+  )].sort((left, right) => left.localeCompare(right));
+
+  return projectNames.map((projectName) => {
+    const projectSignals = activeSignals.filter((signal) => signal.projectNames.includes(projectName));
+    const timelineTitles = projectSignals
+      .filter((signal): signal is Extract<typeof signal, { kind: 'timeline_event' }> => signal.kind === 'timeline_event')
+      .sort((left, right) => right.lastSeenAt - left.lastSeenAt)
+      .map((signal) => signal.payload.title.trim())
+      .filter((title, index, array) => title.length > 0 && array.indexOf(title) === index)
+      .slice(0, 10);
+
+    const decisionTopics = projectSignals
+      .filter((signal): signal is Extract<typeof signal, { kind: 'decision' }> => signal.kind === 'decision')
+      .sort((left, right) => right.supportCount - left.supportCount || right.lastSeenAt - left.lastSeenAt)
+      .map((signal) => signal.payload.topic.trim())
+      .filter((topic, index, array) => topic.length > 0 && array.indexOf(topic) === index)
+      .slice(0, 5);
+
+    const openThreadTitles = projectSignals
+      .filter((signal): signal is Extract<typeof signal, { kind: 'open_thread' }> => signal.kind === 'open_thread')
+      .sort((left, right) => right.lastSeenAt - left.lastSeenAt)
+      .map((signal) => signal.payload.title.trim())
+      .filter((title, index, array) => title.length > 0 && array.indexOf(title) === index)
+      .slice(0, 3);
+
+    return {
+      projectName,
+      signalCount: projectSignals.length,
+      timelineTitles,
+      decisionTopics,
+      openThreadTitles,
+    };
+  });
+}
+
 async function main(): Promise<void> {
   const startTime = Date.now();
   console.log('session-memory extract');
@@ -309,6 +409,9 @@ async function main(): Promise<void> {
     console.log(`Incremental mode: last run ${lastExtraction.last_run}`);
   } else {
     console.log('Full extraction mode (first run)');
+  }
+  if (canonicalStateLooksInconsistent(outputDir, lastExtraction != null)) {
+    console.warn('Warning: .state and .last-extraction.json look inconsistent; Layer 1 will rebuild from all sessions.');
   }
   console.log('');
 
@@ -601,10 +704,12 @@ async function main(): Promise<void> {
           ? { api_key: config.layer3.api_key, api_base_url: config.layer3.api_base_url, model: config.layer3.model }
           : undefined;
 
+      const profileFactAIContext = buildProfileFactAIContext(canonicalStore);
       const pfExtracted = await extractProfileFactCandidates(
         layer3Result.preferences, layer3Result.decisions,
         memorySignals.workProfile, memorySignals.decisions,
         profileFactAIConfig,
+        profileFactAIContext,
       );
       const pfStats = runCanonicalPipeline(pfExtracted, 'profile_fact', canonicalStore);
       console.log(`  Profile facts: ${pfStats.signals} canonical (${pfStats.candidates} candidates, ${pfStats.quarantined} quarantined)`);
@@ -678,9 +783,15 @@ async function main(): Promise<void> {
     const canonicalStore = new CanonicalStore(path.join(outputDir, '.state'));
     canonicalStore.load();
     const sourceSummaryFinal = await registry.getSourceSummary();
+    const projectDescriptions = await generateProjectDescriptions(buildProjectSummaryContexts(canonicalStore), {
+      api_key: config.layer3?.api_key,
+      api_base_url: config.layer3?.api_base_url,
+      model: config.layer3?.model,
+    });
 
     const timelineView = compileTimelineView(
-      canonicalStore.getSignals('timeline_event'), canonicalStore.getSignals(),
+      canonicalStore.getSignals('timeline_event'),
+      projectDescriptions,
       TIMELINE_BUDGET, sourceSummaryFinal, existingTimeline,
     );
     fs.writeFileSync(path.join(outputDir, '项目时间线.md'), timelineView.markdown);

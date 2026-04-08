@@ -56,7 +56,11 @@ function pickProfileFacts(
   dimension: ProfileFactSignal['payload']['dimension'],
 ): ProfileFactSignal[] {
   return sortProfileFacts(
-    signals.filter((s) => s.payload.dimension === dimension && s.status === 'active'),
+    signals.filter((s) => (
+      s.payload.dimension === dimension
+      && s.payload.scope === 'global'
+      && s.status === 'active'
+    )),
   );
 }
 
@@ -220,7 +224,9 @@ export function compileWorkProfileView(
   const coreFields = buildCoreProfileFields(profileFactSignals, allSignals, generatedAt);
   const coreSection = renderCoreProfileSection(coreFields);
 
-  const profileFacts = profileFactSignals.filter(isProfileFactSignal).filter((s) => s.status === 'active');
+  const profileFacts = profileFactSignals
+    .filter(isProfileFactSignal)
+    .filter((s) => s.status === 'active' && s.payload.scope === 'global');
   const coreProfileSignalIds: string[] = profileFacts.map((s) => s.id);
 
   const filteredSignals = sortSignals(

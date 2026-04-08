@@ -18,6 +18,15 @@ const MAX_TOPIC_CHARS = 60;
 
 /** Status words that are not real decisions — skip these entries. */
 const STATUS_WORD_PATTERN = /^(问题|已修复|TODO|Review|PRD已完成|Bug|修复|完成|待处理|待办)$/i;
+const META_COMMENTARY_PATTERNS = [
+  /无法确认.*决策/,
+  /未发现.*决策/,
+  /没有.*明确.*决策/,
+  /insufficient\s+context/i,
+  /no\s+explicit\s+decision/i,
+  /未提取到.*决策/,
+  /无法从.*中提取/,
+];
 
 // ============================================================
 // Helpers
@@ -33,10 +42,17 @@ function buildEvidenceId(prefix: string, stableKey: string): string {
   return computeContentHash(`${prefix}:${stableKey}`);
 }
 
+export function isMetaCommentary(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return false;
+  return META_COMMENTARY_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
 function isSkippableDecision(what: string): boolean {
   const trimmed = what.trim();
   if (trimmed.length === 0) return true;
   if (STATUS_WORD_PATTERN.test(trimmed)) return true;
+  if (isMetaCommentary(trimmed)) return true;
   return false;
 }
 
@@ -89,6 +105,7 @@ function extractFromLayer3Decisions(
 
   for (const d of decisions) {
     if (isSkippableDecision(d.what)) continue;
+    if (isMetaCommentary(d.why ?? '')) continue;
 
     const topic = deriveTopic(d.what);
     const decision = clamp(d.what, MAX_DECISION_CHARS);
@@ -143,6 +160,7 @@ function extractFromMemoryDecisions(
 
   for (const md of memoryDecisions) {
     if (isSkippableDecision(md.what)) continue;
+    if (isMetaCommentary(md.why ?? '')) continue;
 
     const topic = deriveTopic(md.what);
     const decision = clamp(md.what, MAX_DECISION_CHARS);

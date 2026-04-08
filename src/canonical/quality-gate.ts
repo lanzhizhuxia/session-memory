@@ -295,7 +295,8 @@ export function evaluateWorkStyle(candidate: SignalCandidate, evidence: Evidence
   };
 }
 
-const MIN_PROFILE_CLAIM_LENGTH = 8;
+const MIN_PROFILE_CLAIM_LENGTH = 2;
+const MIN_PROFILE_ROLE_CLAIM_LENGTH = 4;
 const MAX_PROFILE_CLAIM_LENGTH = 100;
 const MAX_PROFILE_RATIONALE_LENGTH = 150;
 const PROJECT_EXECUTION_DETAIL_PATTERN = /^\s*(修改|添加|删除|创建|更新|新增|移除|调整)\s*(了|过)?\s*(文件|代码|配置|函数|方法|接口|组件|表|字段)/;
@@ -327,8 +328,9 @@ export function evaluateProfileFact(candidate: SignalCandidate, evidence: Eviden
     issues.push(createIssue('missing_required', 'claim is required.'));
   }
 
-  if (trimmedClaim.length > 0 && trimmedClaim.length < MIN_PROFILE_CLAIM_LENGTH) {
-    issues.push(createIssue('too_vague', `claim is too short (${trimmedClaim.length} chars < ${MIN_PROFILE_CLAIM_LENGTH}).`));
+  const minClaimLength = dimension === 'role' ? MIN_PROFILE_ROLE_CLAIM_LENGTH : MIN_PROFILE_CLAIM_LENGTH;
+  if (trimmedClaim.length > 0 && trimmedClaim.length < minClaimLength) {
+    issues.push(createIssue('too_vague', `claim is too short (${trimmedClaim.length} chars < ${minClaimLength}).`));
   }
 
   if (trimmedClaim.length > MAX_PROFILE_CLAIM_LENGTH) {

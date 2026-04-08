@@ -25,7 +25,7 @@ import { mergeIntoStore } from '../src/canonical/merge.js';
 import { CanonicalStore } from '../src/canonical/store.js';
 import { extractTechPreferenceCandidates } from '../src/canonical/extractors/tech-preference.js';
 import { extractWorkStyleCandidates } from '../src/canonical/extractors/work-style.js';
-import { extractProfileFactCandidates } from '../src/canonical/extractors/profile-fact.js';
+import { extractProfileFactCandidates, type ProfileFactAIConfig } from '../src/canonical/extractors/profile-fact.js';
 import { extractDecisionCandidates } from '../src/canonical/extractors/decision.js';
 import { extractPainPointCandidates } from '../src/canonical/extractors/pain-point.js';
 import { extractTimelineCandidates } from '../src/canonical/extractors/timeline.js';
@@ -596,9 +596,15 @@ async function main(): Promise<void> {
       const ppStats = runCanonicalPipeline(ppExtracted, 'pain_point', canonicalStore);
       console.log(`  Pain points: ${ppStats.signals} canonical (${ppStats.candidates} candidates, ${ppStats.quarantined} quarantined)`);
 
-      const pfExtracted = extractProfileFactCandidates(
+      const profileFactAIConfig: ProfileFactAIConfig | undefined =
+        config.layer3?.api_key && config.layer3?.api_base_url && config.layer3?.model
+          ? { api_key: config.layer3.api_key, api_base_url: config.layer3.api_base_url, model: config.layer3.model }
+          : undefined;
+
+      const pfExtracted = await extractProfileFactCandidates(
         layer3Result.preferences, layer3Result.decisions,
         memorySignals.workProfile, memorySignals.decisions,
+        profileFactAIConfig,
       );
       const pfStats = runCanonicalPipeline(pfExtracted, 'profile_fact', canonicalStore);
       console.log(`  Profile facts: ${pfStats.signals} canonical (${pfStats.candidates} candidates, ${pfStats.quarantined} quarantined)`);

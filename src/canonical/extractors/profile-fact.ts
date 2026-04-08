@@ -9,6 +9,16 @@ import {
 } from '../types.js';
 
 // ============================================================
+// AI Config
+// ============================================================
+
+export interface ProfileFactAIConfig {
+  api_key: string;
+  api_base_url: string;
+  model: string;
+}
+
+// ============================================================
 // Constants
 // ============================================================
 
@@ -572,30 +582,205 @@ function extractFocusAreasFromPreferences(
 }
 
 // ============================================================
+// AI-backed semantic extraction for memory profile entries
+// ============================================================
+
+const PROFILE_SYSTEM_PROMPT = `You are analyzing a user's work profile observations from their coding assistant memory files.
+Extract a structured profile from these observations. Output ONLY valid JSON, no explanation.
+
+Schema:
+{
+  "role": "one job title, max 15 chars, e.g. 产品经理, 量化开发者",
+  "responsibilities": ["2-3 items, each max 30 chars, e.g. 保证金方案设计与推动"],
+  "focus_areas": ["3-5 short domain labels, each max 10 chars, e.g. DeFi 套利, RWA, AI Agent"]
+}
+
+Rules:
+- role must be a job title, NOT a project description or sentence
+- responsibilities must be verb+noun phrases about what the person DOES
+- focus_areas must be short domain labels, NOT sentences
+- Infer from the evidence, do not copy-paste raw text
+- If unclear, omit the field rather than guess`;
+
+interface AIProfileResult {
+  role?: string;
+  responsibilities?: string[];
+  focus_areas?: string[];
+}
+
+const MAX_AI_RETRIES = 2;
+const AI_RETRY_BASE_MS = 1000;
+
+async function callProfileAI(
+  observations: string[],
+  config: ProfileFactAIConfig,
+): Promise<AIProfileResult | null> {
+  const input = observations.map((obs, i) => `${i + 1}. ${obs}`).join('\n');
+
+  for (let attempt = 0; attempt <= MAX_AI_RETRIES; attempt++) {
+    try {
+      const res = await fetch(`${config.api_base_url}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.api_key}`,
+        },
+        body: JSON.stringify({
+          model: config.model,
+          max_tokens: 512,
+          temperature: 0,
+          messages: [
+            { role: 'system', content: PROFILE_SYSTEM_PROMPT },
+            { role: 'user', content: input },
+          ],
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        if ((res.status === 429 || res.status >= 500) && attempt < MAX_AI_RETRIES) {
+          const delayMs = AI_RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500;
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          continue;
+        }
+        console.error(`  Profile AI error: ${res.status} ${body.slice(0, 200)}`);
+        return null;
+      }
+
+      const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const text = data.choices?.[0]?.message?.content?.trim() ?? '';
+      if (text.length === 0) return null;
+
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+
+      return JSON.parse(jsonMatch[0]) as AIProfileResult;
+    } catch (err) {
+      if (attempt < MAX_AI_RETRIES) {
+        const delayMs = AI_RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      console.error(`  Profile AI failed:`, err instanceof Error ? err.message : err);
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function isValidRole(role: string): boolean {
+  if (role.length === 0 || role.length > 20) return false;
+  if (LONG_SENTENCE_PATTERN.test(role)) return false;
+  if (PROJECT_DESCRIPTION_PATTERN.test(role)) return false;
+  return true;
+}
+
+function isValidResponsibility(resp: string): boolean {
+  return resp.length > 0 && resp.length <= 40 && !LONG_SENTENCE_PATTERN.test(resp);
+}
+
+function isValidFocusArea(area: string): boolean {
+  return area.length > 0 && area.length <= 15 && !LONG_SENTENCE_PATTERN.test(area);
+}
+
+async function extractProfileFactsWithAI(
+  memoryProfileEntries: MemoryProfileEntry[],
+  config: ProfileFactAIConfig,
+): Promise<{ candidates: SignalCandidate[]; evidence: EvidenceRecord[] }> {
+  const candidates: SignalCandidate[] = [];
+  const evidence: EvidenceRecord[] = [];
+
+  const observations = memoryProfileEntries
+    .map((e) => e.observation?.trim() ?? '')
+    .filter((obs) => obs.length > 0 && obs.length < RAW_TEXT_LENGTH_THRESHOLD);
+
+  if (observations.length === 0) return { candidates, evidence };
+
+  const result = await callProfileAI(observations, config);
+  if (result == null) return { candidates, evidence };
+
+  const evidenceId = buildEvidenceId('ai-profile-semantic', observations.join('|'));
+  const evidenceRecord: EvidenceRecord = {
+    id: evidenceId,
+    sourceKind: 'memory_file',
+    sourceLabel: 'memory-ai-semantic',
+    content: observations.join(' | '),
+    contentHash: computeContentHash(`ai-profile:${observations.join('|')}`),
+    capturedAt: Date.now(),
+    trustScore: 4,
+    recencyScore: 1,
+    extractionHints: ['profile-fact', 'ai-semantic'],
+  };
+  evidence.push(evidenceRecord);
+
+  if (result.role != null && isValidRole(result.role)) {
+    const payload: ProfileFactPayload = {
+      dimension: 'role',
+      claim: clamp(result.role, MAX_CLAIM_CHARS),
+      scope: 'global',
+    };
+    candidates.push(buildCandidateFromPayload(payload, evidenceRecord, 'canonical-ai-semantic-profile-fact', 0.9));
+  }
+
+  if (result.responsibilities != null) {
+    for (const resp of result.responsibilities.slice(0, 3)) {
+      if (!isValidResponsibility(resp)) continue;
+      const payload: ProfileFactPayload = {
+        dimension: 'responsibility',
+        claim: clamp(resp, MAX_CLAIM_CHARS),
+        scope: 'global',
+      };
+      candidates.push(buildCandidateFromPayload(payload, evidenceRecord, 'canonical-ai-semantic-profile-fact', 0.85));
+    }
+  }
+
+  if (result.focus_areas != null) {
+    for (const area of result.focus_areas.slice(0, 5)) {
+      if (!isValidFocusArea(area)) continue;
+      const payload: ProfileFactPayload = {
+        dimension: 'focus_area',
+        claim: clamp(area, MAX_CLAIM_CHARS),
+        scope: 'global',
+      };
+      candidates.push(buildCandidateFromPayload(payload, evidenceRecord, 'canonical-ai-semantic-profile-fact', 0.85));
+    }
+  }
+
+  return { candidates, evidence };
+}
+
+// ============================================================
 // Public API
 // ============================================================
 
-export function extractProfileFactCandidates(
+export async function extractProfileFactCandidates(
   layer3Preferences: Preference[],
   layer3Decisions: Decision[],
   memoryProfileEntries: MemoryProfileEntry[],
   memoryDecisions: MemoryDecision[],
-): { candidates: SignalCandidate[]; evidence: EvidenceRecord[] } {
-  // Role dimension
-  const memoryRoles = extractRolesFromMemory(memoryProfileEntries);
+  aiConfig?: ProfileFactAIConfig,
+): Promise<{ candidates: SignalCandidate[]; evidence: EvidenceRecord[] }> {
+  // AI-backed semantic extraction (replaces regex-based memory extraction when available)
+  const aiProfileFacts = aiConfig != null
+    ? await extractProfileFactsWithAI(memoryProfileEntries, aiConfig)
+    : { candidates: [] as SignalCandidate[], evidence: [] as EvidenceRecord[] };
+  const hasAIResults = aiProfileFacts.candidates.length > 0;
+
+  // Regex-based memory extraction (fallback when AI unavailable or returns empty)
+  const memoryRoles = hasAIResults ? { candidates: [], evidence: [] } : extractRolesFromMemory(memoryProfileEntries);
+  const memoryResponsibilities = hasAIResults ? { candidates: [], evidence: [] } : extractResponsibilitiesFromMemory(memoryProfileEntries);
+  const memoryFocusAreas = hasAIResults ? { candidates: [], evidence: [] } : extractFocusAreasFromMemory(memoryProfileEntries);
+
+  // Decision-inferred (always runs — complementary to AI)
   const inferredRoles = inferRoleFromDecisions(layer3Decisions);
-
-  // Responsibility dimension
-  const memoryResponsibilities = extractResponsibilitiesFromMemory(memoryProfileEntries);
   const inferredResponsibilities = inferResponsibilitiesFromDecisions(layer3Decisions, memoryDecisions);
-
-  // Focus area dimension
   const decisionFocusAreas = extractFocusAreasFromDecisions(layer3Decisions, memoryDecisions);
-  const memoryFocusAreas = extractFocusAreasFromMemory(memoryProfileEntries);
   const preferenceFocusAreas = extractFocusAreasFromPreferences(layer3Preferences);
 
   return {
     candidates: [
+      ...aiProfileFacts.candidates,
       ...memoryRoles.candidates,
       ...inferredRoles.candidates,
       ...memoryResponsibilities.candidates,
@@ -605,6 +790,7 @@ export function extractProfileFactCandidates(
       ...preferenceFocusAreas.candidates,
     ],
     evidence: [
+      ...aiProfileFacts.evidence,
       ...memoryRoles.evidence,
       ...inferredRoles.evidence,
       ...memoryResponsibilities.evidence,

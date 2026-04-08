@@ -72,6 +72,7 @@ interface Config {
     model?: string;
     long_context_model?: string;
     long_context_threshold?: number;
+    batch_size?: number;
     consolidation_model?: string;
   };
   memory?: {
@@ -560,6 +561,7 @@ async function main(): Promise<void> {
       model: config.layer3?.model,
       long_context_model: config.layer3?.long_context_model,
       long_context_threshold: config.layer3?.long_context_threshold,
+      batch_size: config.layer3?.batch_size,
       consolidation_model: config.layer3?.consolidation_model,
     };
 

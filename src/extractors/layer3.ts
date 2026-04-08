@@ -22,6 +22,7 @@ export interface Layer3Config {
   long_context_model?: string;
   consolidation_model?: string;
   long_context_threshold?: number;
+  batch_size?: number;
 }
 
 export interface Decision {
@@ -215,6 +216,13 @@ const PREFERENCE_PROMPT = `你是一个工作风格观察器。只关注用户�
 // AI call — supports OpenAI-compatible (LiteLLM) and Anthropic native APIs
 // ============================================================
 
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 1000;
+
+function isRetryable(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
 async function callAI(
   systemPrompt: string,
   conversationText: string,
@@ -228,67 +236,81 @@ async function callAI(
 
   if (!apiKey) return null;
 
-  // Detect API format: if base URL is NOT api.anthropic.com, use OpenAI-compatible format (LiteLLM)
   const isAnthropicNative = baseUrl.includes('api.anthropic.com');
 
-  try {
-    let res: Response;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      let res: Response;
 
-    if (isAnthropicNative) {
-      // Anthropic Messages API
-      res = await fetch(`${baseUrl}/v1/messages`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: maxTokens,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: conversationText }],
-        }),
-      });
-    } else {
-      // OpenAI-compatible API (LiteLLM, etc.)
-      res = await fetch(`${baseUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: maxTokens,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: conversationText },
-          ],
-        }),
-      });
-    }
+      if (isAnthropicNative) {
+        res = await fetch(`${baseUrl}/v1/messages`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: maxTokens,
+            system: systemPrompt,
+            messages: [{ role: 'user', content: conversationText }],
+          }),
+        });
+      } else {
+        res = await fetch(`${baseUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: maxTokens,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: conversationText },
+            ],
+          }),
+        });
+      }
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      console.error(`  AI API error: ${res.status} ${res.statusText} ${body.slice(0, 200)}`);
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        if (isRetryable(res.status) && attempt < MAX_RETRIES) {
+          const retryAfter = parseInt(res.headers.get('retry-after') ?? '', 10);
+          const delayMs = (Number.isFinite(retryAfter) && retryAfter > 0)
+            ? retryAfter * 1000
+            : RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500;
+          console.warn(`  AI API ${res.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${Math.round(delayMs)}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          continue;
+        }
+        console.error(`  AI API error: ${res.status} ${res.statusText} ${body.slice(0, 200)}`);
+        return null;
+      }
+
+      const data = await res.json();
+
+      if (isAnthropicNative) {
+        const text = data.content?.find((c: { type: string; text?: string }) => c.type === 'text')?.text;
+        return text ?? null;
+      } else {
+        return data.choices?.[0]?.message?.content ?? null;
+      }
+    } catch (err) {
+      if (attempt < MAX_RETRIES) {
+        const delayMs = RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500;
+        console.warn(`  AI call error, retry ${attempt + 1}/${MAX_RETRIES} in ${Math.round(delayMs)}ms: ${err instanceof Error ? err.message : err}`);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      console.error(`  AI call failed after ${MAX_RETRIES} retries:`, err instanceof Error ? err.message : err);
       return null;
     }
-
-    const data = await res.json();
-
-    if (isAnthropicNative) {
-      // Anthropic format: { content: [{ type: "text", text: "..." }] }
-      const text = data.content?.find((c: { type: string; text?: string }) => c.type === 'text')?.text;
-      return text ?? null;
-    } else {
-      // OpenAI format: { choices: [{ message: { content: "..." } }] }
-      return data.choices?.[0]?.message?.content ?? null;
-    }
-  } catch (err) {
-    console.error(`  AI call failed:`, err instanceof Error ? err.message : err);
-    return null;
   }
+
+  return null;
 }
 
 function parseJSON<T>(text: string | null): T | null {
@@ -421,7 +443,7 @@ export async function runLayer3(
   const failedIds: string[] = [];
 
   // Process in batches of 5
-  const batchSize = 5;
+  const batchSize = config.batch_size ?? 20;
   for (let i = 0; i < candidates.length; i += batchSize) {
     const batch = candidates.slice(i, i + batchSize);
     console.log(`  Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(candidates.length / batchSize)} (${batch.length} sessions)...`);

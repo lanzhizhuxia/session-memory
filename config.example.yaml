@@ -34,6 +34,7 @@ layer3:
   enabled: true             # 设为 false 跳过 AI 提取
   min_score: 3              # 加权分数 ≥ 此值进入 AI 分析
   max_sessions: 500         # 单次运行上限（safety cap）
+  batch_size: 15            # 每批并发 session 数（默认 15，每 session 3 AI 调用 = 峰值 45 并发）
   # api_key: "sk-..."       # 或设置 ANTHROPIC_API_KEY 环境变量
   # api_base_url: "https://api.anthropic.com"  # 自定义 API 端点
   # model: "claude-haiku-4-5-20251001"          # 默认用 Haiku（成本低）

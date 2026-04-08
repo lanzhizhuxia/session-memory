@@ -96,6 +96,30 @@ const OPERATIONAL_RULE_PATTERNS = [
   /\bpre-commit\b/i,
 ];
 
+const AI_INSTRUCTION_PATTERNS = [
+  /\bin chat replies\b/i,
+  /\bwhen the user says\b/i,
+  /\bgithub\s+(issues?|comments?|pr)\b/i,
+  /\bcommit\s+message\b/i,
+  /\bgit\s+(stash|rebase|pull|push)\b/i,
+  /\bprlctl\b/i,
+  /\bdocker(file)?\b/i,
+  /\bnpm\s+publish\b/i,
+  /\btmux\b/i,
+  /\bMulti-agent safety\b/i,
+  /\brelease\s+(flow|guardrail)\b/i,
+  /\bplugin/i,
+  /\bMintlify\b/i,
+  /\bCarbon\s+dependency\b/i,
+  /\bSwiftUI\b/i,
+  /\bOxlint\b/i,
+  /\bnode_modules\b/i,
+  /\bshim\b.*\bPowerShell\b/i,
+  /\bParallels\b/i,
+  /\bschema\s+guardrail\b/i,
+  /\bstreaming.*partial\b/i,
+];
+
 export async function runLayer0(
   adapters: MemoryAdapter[],
   config: Layer0Config,
@@ -264,7 +288,6 @@ function processAutoMemoryItem(item: MemoryItem, sourceLabel: string, signals: M
           sourcePath: item.path,
           category: classifyProfileCategory(observation),
           observation,
-          evidence: observation,
         };
         signals.workProfile.push(entry);
         contentHashes.push(computeProfileContentHash(entry));
@@ -287,26 +310,30 @@ function processRuleItem(item: MemoryItem, sourceLabel: string, signals: MemoryS
   const preferences = buildTechPreferencesFromContent(item, sourceLabel, parsed.body);
   signals.techPreferences.push(...preferences);
 
+  if (item.scope !== 'user') {
+    return { warned: 0, contentHashes: [] };
+  }
+
   const contentHashes: string[] = [];
   const blocks = extractBlocks(parsed.body)
     .filter((block) => PREFERENCE_PATTERNS.some((pattern) => pattern.test(block)))
-    .filter((block) => !OPERATIONAL_RULE_PATTERNS.some((pattern) => pattern.test(block)));
+    .filter((block) => !OPERATIONAL_RULE_PATTERNS.some((pattern) => pattern.test(block)))
+    .filter((block) => !AI_INSTRUCTION_PATTERNS.some((pattern) => pattern.test(block)));
 
   blocks.forEach((block, index) => {
     const observation = cleanBlock(block);
     if (observation.length === 0) {
       return;
     }
-    const entry = {
+    const ruleEntry = {
       stableId: derivedStableId(item.stableId, `rule-profile:${index}`),
       sourceLabel,
       sourcePath: item.path,
       category: classifyProfileCategory(observation),
       observation,
-      evidence: observation,
     };
-    signals.workProfile.push(entry);
-    contentHashes.push(computeProfileContentHash(entry));
+    signals.workProfile.push(ruleEntry);
+    contentHashes.push(computeProfileContentHash(ruleEntry));
   });
 
   return { warned: 0, contentHashes };

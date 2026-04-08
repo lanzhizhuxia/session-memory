@@ -858,8 +858,8 @@ function renderWorkProfile(preferences: Preference[], sourceSummary: string, exi
       for (const [cat, entries] of memCategories) {
         lines.push(`## ${cat}（记忆来源）`);
         for (const e of entries) {
-          const evidence = e.evidence ? ` — *${e.evidence}*` : '';
-          lines.push(`- ${e.observation}${evidence} — *[${e.sourceLabel}] ${e.sourcePath}*`);
+          const evidence = e.evidence && e.evidence !== e.observation ? ` — *${e.evidence}*` : '';
+          lines.push(`- ${e.observation}${evidence} [${e.sourceLabel}]`);
         }
         lines.push('');
       }

@@ -11,13 +11,29 @@ import { parse as parseYaml } from 'yaml';
 import { OpenCodeAdapter } from '../src/adapters/opencode.js';
 import { ClaudeCodeAdapter } from '../src/adapters/claude-code.js';
 import { AdapterRegistry } from '../src/adapters/registry.js';
+import type { MergedProject, Session } from '../src/adapters/types.js';
 import { NoiseFilter } from '../src/utils/noise-filter.js';
 import { runLayer1 } from '../src/extractors/layer1.js';
 import { runLayer2 } from '../src/extractors/layer2.js';
 import { runLayer3, type Decision, type PainPoint, type Preference } from '../src/extractors/layer3.js';
+import type { MemoryAdapter } from '../src/memory/interface.js';
 import { ClaudeCodeMemoryAdapter } from '../src/memory/claude-code-memory.js';
 import { runLayer0 } from '../src/extractors/layer0.js';
-import { emptyMemorySignals, emptyMemoryTrackingState, type MemoryTrackingState } from '../src/memory/types.js';
+import { emptyMemorySignals, emptyMemoryTrackingState, type MemoryItem, type MemoryTrackingState } from '../src/memory/types.js';
+import { evaluateCandidate } from '../src/canonical/quality-gate.js';
+import { mergeIntoStore } from '../src/canonical/merge.js';
+import { CanonicalStore } from '../src/canonical/store.js';
+import { extractTechPreferenceCandidates } from '../src/canonical/extractors/tech-preference.js';
+import { TECH_PREFS_BUDGET, compileTechPreferencesView } from '../src/canonical/views/tech-preferences.js';
+import type { QuarantineRecord } from '../src/canonical/store.js';
+import type { SignalCandidate, ViewBudget } from '../src/canonical/types.js';
+
+interface CanonicalTechSession extends Session {
+  canonicalProjectPath?: string;
+  projectName?: string;
+  sourceLabel?: string;
+  firstUserMessage?: string;
+}
 
 function expandHome(p: string): string {
   if (p.startsWith('~')) return path.join(os.homedir(), p.slice(1));
@@ -57,6 +73,15 @@ interface Config {
       agents_md?: boolean;
     };
     source_labels?: Record<string, string>;
+  };
+  canonical?: {
+    enabled?: boolean;
+    tech_preferences?: {
+      max_chars?: number;
+      max_items_total?: number;
+      max_items_per_section?: number;
+      max_sections?: number;
+    };
   };
   output_dir?: string;
 }
@@ -152,6 +177,49 @@ function readFileIfExists(filePath: string): string | undefined {
   }
 }
 
+async function loadMemoryItems(adapters: MemoryAdapter[]): Promise<MemoryItem[]> {
+  const items: MemoryItem[] = [];
+
+  for (const adapter of adapters) {
+    if (!await adapter.detect()) {
+      continue;
+    }
+
+    items.push(...await adapter.listMemoryItems());
+  }
+
+  return items;
+}
+
+async function collectCanonicalTechSessions(
+  registry: AdapterRegistry,
+  noiseFilter: NoiseFilter,
+  mergedProjects: MergedProject[],
+): Promise<CanonicalTechSession[]> {
+  const sessions: CanonicalTechSession[] = [];
+
+  for (const project of mergedProjects) {
+    if (noiseFilter.isNoise(project)) {
+      continue;
+    }
+
+    const projectSessions = await registry.getSessions(project);
+    for (const session of projectSessions) {
+      const messages = await registry.getMessages(session);
+      const firstUserMessage = messages.find((message) => message.role === 'user');
+      sessions.push({
+        ...session,
+        firstUserMessage: firstUserMessage?.content,
+        sourceLabel: registry.getSourceLabel(session.source),
+        projectName: project.name,
+        canonicalProjectPath: project.path,
+      });
+    }
+  }
+
+  return sessions;
+}
+
 async function main(): Promise<void> {
   const startTime = Date.now();
   console.log('session-memory extract');
@@ -224,10 +292,11 @@ async function main(): Promise<void> {
   const memoryEnabled = config.memory?.enabled !== false;
   let memorySignals = emptyMemorySignals();
   let memoryTracking = emptyMemoryTrackingState();
+  let memoryItems: MemoryItem[] = [];
 
   if (memoryEnabled) {
     console.log('\nLayer 0: Memory signal collection...');
-    const memoryAdapters: ClaudeCodeMemoryAdapter[] = [];
+    const memoryAdapters: MemoryAdapter[] = [];
 
     const ccMemConfig = config.memory?.['claude-code'];
     const includeAutoMemory = ccMemConfig?.auto_memory !== false;
@@ -253,6 +322,7 @@ async function main(): Promise<void> {
 
       memorySignals = layer0Result.signals;
       memoryTracking = layer0Result.tracking;
+      memoryItems = await loadMemoryItems(memoryAdapters);
       console.log(`  Files processed: ${layer0Result.stats.filesProcessed}, skipped: ${layer0Result.stats.filesSkipped}, warned: ${layer0Result.stats.filesWarned}`);
       console.log(`  Signals: ${memorySignals.decisions.length} decisions, ${memorySignals.painPoints.length} pain points, ${memorySignals.workProfile.length} profile, ${memorySignals.techPreferences.length} tech prefs`);
     } else {
@@ -316,19 +386,95 @@ async function main(): Promise<void> {
 
   const sourceSummary = await registry.getSourceSummary();
   const existingWorkPatterns = readFileIfExists(path.join(outputDir, '工作模式.md'));
-  const existingTechPrefs = readFileIfExists(path.join(outputDir, '技术偏好.md'));
 
   const layer2Result = await runLayer2(
     registry, noiseFilter, mergedProjects, sourceSummary,
-    existingWorkPatterns, existingTechPrefs,
+    existingWorkPatterns, undefined,
     memorySignals.techPreferences.length > 0 ? memorySignals.techPreferences : undefined,
   );
 
   fs.writeFileSync(path.join(outputDir, '工作模式.md'), layer2Result.workPatternsContent);
-  fs.writeFileSync(path.join(outputDir, '技术偏好.md'), layer2Result.techPreferencesContent);
-  console.log('  Written: 工作模式.md, 技术偏好.md');
+  console.log('  Written: 工作模式.md');
   console.log(`  Task types: ${layer2Result.taskTypes.length} categories`);
   console.log(`  Tech mentions: ${layer2Result.techMentions.length} technologies detected`);
+
+  const canonicalEnabled = config.canonical?.enabled !== false;
+  if (canonicalEnabled) {
+    console.log('  Canonical tech_preference pipeline...');
+
+    const canonicalStore = new CanonicalStore(path.join(outputDir, '.state'));
+    canonicalStore.load();
+
+    const canonicalSessions = await collectCanonicalTechSessions(registry, noiseFilter, mergedProjects);
+    const extracted = extractTechPreferenceCandidates(memoryItems, canonicalSessions, mergedProjects);
+    const evidenceById = new Map(extracted.evidence.map((entry) => [entry.id, entry]));
+    const acceptedCandidates: SignalCandidate[] = [];
+    const quarantineRecords: QuarantineRecord[] = [];
+
+    for (const candidate of extracted.candidates) {
+      const supportingEvidence = candidate.evidenceIds
+        .map((evidenceId) => evidenceById.get(evidenceId))
+        .filter((evidence): evidence is NonNullable<typeof evidence> => evidence != null);
+      const result = evaluateCandidate(candidate, supportingEvidence);
+
+      if (result.decision === 'accept' || result.decision === 'needs_merge') {
+        acceptedCandidates.push(candidate);
+        continue;
+      }
+
+      quarantineRecords.push({
+        candidate,
+        reasonCodes: result.issues.map((issue) => issue.code),
+        createdAt: Date.now(),
+      });
+    }
+
+    const mergeResult = mergeIntoStore(
+      acceptedCandidates,
+      [],
+      'tech_preference',
+    );
+
+    canonicalStore.addEvidence(extracted.evidence);
+    canonicalStore.replaceSignals('tech_preference', mergeResult.signals.filter((signal) => signal.kind === 'tech_preference'));
+    canonicalStore.addQuarantine([...quarantineRecords, ...mergeResult.quarantined.map((candidate) => ({
+      candidate,
+      reasonCodes: ['merge_rejected'],
+      createdAt: Date.now(),
+    }))]);
+
+    const techPreferenceBudget: ViewBudget = {
+      ...TECH_PREFS_BUDGET,
+      maxChars: config.canonical?.tech_preferences?.max_chars ?? TECH_PREFS_BUDGET.maxChars,
+      maxItemsTotal: config.canonical?.tech_preferences?.max_items_total ?? TECH_PREFS_BUDGET.maxItemsTotal,
+      maxItemsPerSection: config.canonical?.tech_preferences?.max_items_per_section ?? 10,
+      maxSections: config.canonical?.tech_preferences?.max_sections ?? TECH_PREFS_BUDGET.maxSections,
+    };
+
+    const existingTechPreferences = readFileIfExists(path.join(outputDir, '技术偏好.md'));
+    const techPreferencesView = compileTechPreferencesView(
+      canonicalStore.getSignals('tech_preference'),
+      techPreferenceBudget,
+      sourceSummary,
+      existingTechPreferences,
+    );
+
+    const publishedIds = new Set(techPreferencesView.sourceSignalIds);
+    canonicalStore.replaceSignals(
+      'tech_preference',
+      canonicalStore.getSignals('tech_preference').map((signal) => publishedIds.has(signal.id)
+        ? { ...signal, lastPublishedAt: techPreferencesView.generatedAt }
+        : signal),
+    );
+    canonicalStore.upsertPublishedView(techPreferencesView);
+    canonicalStore.save();
+
+    fs.writeFileSync(path.join(outputDir, '技术偏好.md'), techPreferencesView.markdown);
+    console.log(`  Written: 技术偏好.md (canonical, ${techPreferencesView.sourceSignalIds.length} signals)`);
+  } else {
+    fs.writeFileSync(path.join(outputDir, '技术偏好.md'), layer2Result.techPreferencesContent);
+    console.log('  Written: 技术偏好.md (legacy)');
+  }
 
   // ============================================================
   // Layer 3: Deep extraction (AI batch summary)

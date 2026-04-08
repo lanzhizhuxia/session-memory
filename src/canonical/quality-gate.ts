@@ -707,8 +707,8 @@ export function evaluateOpenThread(candidate: SignalCandidate, evidence: Evidenc
     issues.push(createIssue('too_vague', `title is not actionable: "${trimmedTitle}".`));
   }
 
-  if (status !== 'open' && status !== 'in_progress') {
-    issues.push(createIssue('missing_required', `status must be open or in_progress, got: "${status}".`));
+  if (status !== 'open' && status !== 'in_progress' && status !== 'blocked') {
+    issues.push(createIssue('missing_required', `status must be open, in_progress, or blocked, got: "${status}".`));
   }
 
   if (evidence.length === 0) {

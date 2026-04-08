@@ -234,6 +234,34 @@ async function collectCanonicalTechSessions(
   return sessions;
 }
 
+function runCanonicalPipeline(
+  extracted: { candidates: SignalCandidate[]; evidence: EvidenceRecord[] },
+  kind: SignalKind,
+  store: CanonicalStore,
+): { accepted: number; quarantined: number; signals: number; candidates: number } {
+  const evidenceById = new Map(extracted.evidence.map((e) => [e.id, e]));
+  const accepted: SignalCandidate[] = [];
+  const quarantined: QuarantineRecord[] = [];
+  for (const candidate of extracted.candidates) {
+    const ev = candidate.evidenceIds
+      .map((id) => evidenceById.get(id))
+      .filter((e): e is NonNullable<typeof e> => e != null);
+    const result = evaluateCandidate(candidate, ev);
+    if (result.decision === 'accept' || result.decision === 'needs_merge') {
+      accepted.push(candidate);
+    } else {
+      quarantined.push({ candidate, reasonCodes: result.issues.map((i) => i.code), createdAt: Date.now() });
+    }
+  }
+  const merge = mergeIntoStore(accepted, store.getSignals(kind), kind);
+  store.addEvidence(extracted.evidence);
+  store.addSignals(merge.signals);
+  store.addQuarantine([...quarantined, ...merge.quarantined.map((c) => ({
+    candidate: c, reasonCodes: ['merge_rejected'], createdAt: Date.now(),
+  }))]);
+  return { accepted: accepted.length, quarantined: quarantined.length, signals: merge.signals.length, candidates: extracted.candidates.length };
+}
+
 async function main(): Promise<void> {
   const startTime = Date.now();
   console.log('session-memory extract');
@@ -376,36 +404,12 @@ async function main(): Promise<void> {
     canonicalStore.load();
     const sourceSummaryL1 = await registry.getSourceSummary();
 
-    const runCanonicalPipelineL1 = (extracted: { candidates: SignalCandidate[]; evidence: EvidenceRecord[] }, kind: SignalKind) => {
-      const evidenceById = new Map(extracted.evidence.map((e) => [e.id, e]));
-      const accepted: SignalCandidate[] = [];
-      const quarantined: QuarantineRecord[] = [];
-      for (const candidate of extracted.candidates) {
-        const ev = candidate.evidenceIds
-          .map((id) => evidenceById.get(id))
-          .filter((e): e is NonNullable<typeof e> => e != null);
-        const result = evaluateCandidate(candidate, ev);
-        if (result.decision === 'accept' || result.decision === 'needs_merge') {
-          accepted.push(candidate);
-        } else {
-          quarantined.push({ candidate, reasonCodes: result.issues.map((i) => i.code), createdAt: Date.now() });
-        }
-      }
-      const merge = mergeIntoStore(accepted, canonicalStore.getSignals(kind), kind);
-      canonicalStore.addEvidence(extracted.evidence);
-      canonicalStore.addSignals(merge.signals);
-      canonicalStore.addQuarantine([...quarantined, ...merge.quarantined.map((c) => ({
-        candidate: c, reasonCodes: ['merge_rejected'], createdAt: Date.now(),
-      }))]);
-      return { accepted: accepted.length, quarantined: quarantined.length, signals: merge.signals.length, candidates: extracted.candidates.length };
-    };
-
     const tlExtracted = extractTimelineCandidates(layer1Result.timelineData);
-    const tlStats = runCanonicalPipelineL1(tlExtracted, 'timeline_event');
+    const tlStats = runCanonicalPipeline(tlExtracted, 'timeline_event', canonicalStore);
     console.log(`  Timeline events: ${tlStats.signals} canonical (${tlStats.candidates} candidates, ${tlStats.quarantined} quarantined)`);
 
     const otExtracted = extractOpenThreadCandidates(layer1Result.todoWithContext);
-    const otStats = runCanonicalPipelineL1(otExtracted, 'open_thread');
+    const otStats = runCanonicalPipeline(otExtracted, 'open_thread', canonicalStore);
     console.log(`  Open threads: ${otStats.signals} canonical (${otStats.candidates} candidates, ${otStats.quarantined} quarantined)`);
 
     const openThreadsView = compileOpenThreadsView(
@@ -582,47 +586,23 @@ async function main(): Promise<void> {
       const canonicalStore = new CanonicalStore(path.join(outputDir, '.state'));
       canonicalStore.load();
 
-      const runCanonicalPipeline = (extracted: { candidates: SignalCandidate[]; evidence: EvidenceRecord[] }, kind: SignalKind) => {
-        const evidenceById = new Map(extracted.evidence.map((e) => [e.id, e]));
-        const accepted: SignalCandidate[] = [];
-        const quarantined: QuarantineRecord[] = [];
-        for (const candidate of extracted.candidates) {
-          const ev = candidate.evidenceIds
-            .map((id) => evidenceById.get(id))
-            .filter((e): e is NonNullable<typeof e> => e != null);
-          const result = evaluateCandidate(candidate, ev);
-          if (result.decision === 'accept' || result.decision === 'needs_merge') {
-            accepted.push(candidate);
-          } else {
-            quarantined.push({ candidate, reasonCodes: result.issues.map((i) => i.code), createdAt: Date.now() });
-          }
-        }
-        const merge = mergeIntoStore(accepted, canonicalStore.getSignals(kind), kind);
-        canonicalStore.addEvidence(extracted.evidence);
-        canonicalStore.addSignals(merge.signals);
-        canonicalStore.addQuarantine([...quarantined, ...merge.quarantined.map((c) => ({
-          candidate: c, reasonCodes: ['merge_rejected'], createdAt: Date.now(),
-        }))]);
-        return { accepted: accepted.length, quarantined: quarantined.length, signals: merge.signals.length, candidates: extracted.candidates.length };
-      };
-
       const decExtracted = extractDecisionCandidates(layer3Result.decisions, memorySignals.decisions);
-      const decStats = runCanonicalPipeline(decExtracted, 'decision');
+      const decStats = runCanonicalPipeline(decExtracted, 'decision', canonicalStore);
       console.log(`  Decisions: ${decStats.signals} canonical (${decStats.candidates} candidates, ${decStats.quarantined} quarantined)`);
 
       const ppExtracted = extractPainPointCandidates(layer3Result.painPoints, memorySignals.painPoints);
-      const ppStats = runCanonicalPipeline(ppExtracted, 'pain_point');
+      const ppStats = runCanonicalPipeline(ppExtracted, 'pain_point', canonicalStore);
       console.log(`  Pain points: ${ppStats.signals} canonical (${ppStats.candidates} candidates, ${ppStats.quarantined} quarantined)`);
 
       const pfExtracted = extractProfileFactCandidates(
         layer3Result.preferences, layer3Result.decisions,
         memorySignals.workProfile, memorySignals.decisions,
       );
-      const pfStats = runCanonicalPipeline(pfExtracted, 'profile_fact');
+      const pfStats = runCanonicalPipeline(pfExtracted, 'profile_fact', canonicalStore);
       console.log(`  Profile facts: ${pfStats.signals} canonical (${pfStats.candidates} candidates, ${pfStats.quarantined} quarantined)`);
 
       const wsExtracted = extractWorkStyleCandidates(layer3Result.preferences, memorySignals.workProfile);
-      const wsStats = runCanonicalPipeline(wsExtracted, 'work_style');
+      const wsStats = runCanonicalPipeline(wsExtracted, 'work_style', canonicalStore);
       console.log(`  Work styles: ${wsStats.signals} canonical (${wsStats.candidates} candidates, ${wsStats.quarantined} quarantined)`);
 
       const existingDecisions = readFileIfExists(path.join(outputDir, '决策日志.md'));

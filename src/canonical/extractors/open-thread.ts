@@ -13,10 +13,10 @@ function clampTitle(title: string): string {
   return trimmed.length <= 80 ? trimmed : `${trimmed.slice(0, 79).trim()}…`;
 }
 
-function mapStatus(status: string): OpenThreadPayload['status'] {
+function mapStatus(status: string): OpenThreadPayload['status'] | null {
   if (status === 'in_progress') return 'in_progress';
   if (status === 'pending') return 'open';
-  return 'open';
+  return null;
 }
 
 export function extractOpenThreadCandidates(
@@ -29,8 +29,14 @@ export function extractOpenThreadCandidates(
     const title = clampTitle(todo.content);
     if (title.length === 0) continue;
 
+    const mappedStatus = mapStatus(todo.status);
+    if (mappedStatus == null) continue;
+
     const stableKey = `open-thread:${todo.projectName}:${todo.sessionId ?? 'no-session'}:${todo.content}`;
     const evidenceId = computeContentHash(stableKey);
+
+    const now = Date.now();
+    const todayStr = new Date(now).toISOString().slice(0, 10);
 
     const evidenceRecord: EvidenceRecord = {
       id: evidenceId,
@@ -41,10 +47,8 @@ export function extractOpenThreadCandidates(
       todoId: evidenceId,
       content: title,
       contentHash: computeContentHash(title),
-      capturedAt: todo.timeCreated ?? Date.now(),
-      observedAt: todo.timeCreated != null
-        ? new Date(todo.timeCreated).toISOString().slice(0, 10)
-        : undefined,
+      capturedAt: todo.timeCreated ?? now,
+      observedAt: todayStr,
       trustScore: 2,
       recencyScore: 1,
       extractionHints: ['open_thread'],
@@ -53,7 +57,7 @@ export function extractOpenThreadCandidates(
     const payload: OpenThreadPayload = {
       threadType: 'todo',
       title,
-      status: mapStatus(todo.status),
+      status: mappedStatus,
       nextAction: undefined,
     };
 

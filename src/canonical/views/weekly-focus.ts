@@ -35,7 +35,7 @@ function isWithinDays(signal: CanonicalSignal, days: number, now: number): boole
 }
 
 function hasCompletionSemantics(signal: TimelineSignal): boolean {
-  if (signal.payload.eventType === 'delivery' || signal.payload.eventType === 'milestone') return true;
+  if (signal.payload.eventType === 'delivery') return true;
   return COMPLETION_PATTERN.test(signal.payload.title);
 }
 

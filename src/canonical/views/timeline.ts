@@ -44,21 +44,18 @@ function deriveProjectDescription(
   projectName: string,
   allSignals: CanonicalSignal[],
 ): string {
-  const projectSignals = allSignals.filter(
-    (signal) => signal.status === 'active' && signal.projectNames.includes(projectName),
-  );
+  const projectSignals = allSignals
+    .filter((signal) => signal.status === 'active' && signal.projectNames.includes(projectName))
+    .sort((left, right) => right.trustScore - left.trustScore || right.supportCount - left.supportCount);
 
   const snippets: string[] = [];
 
   for (const signal of projectSignals) {
-    if (signal.kind === 'decision' && snippets.length < 3) {
+    if (snippets.length >= 3) break;
+    if (signal.kind === 'decision') {
       snippets.push(signal.payload.topic);
-    }
-    if (signal.kind === 'tech_preference' && snippets.length < 3) {
-      snippets.push(signal.payload.technology);
-    }
-    if (signal.kind === 'pain_point' && snippets.length < 3) {
-      snippets.push(signal.payload.problem);
+    } else if (signal.kind === 'timeline_event' && signal.payload.eventType !== 'milestone') {
+      snippets.push(signal.payload.title);
     }
   }
 

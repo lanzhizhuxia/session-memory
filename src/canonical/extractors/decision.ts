@@ -21,6 +21,7 @@ const STATUS_WORD_PATTERN = /^(问题|已修复|TODO|Review|PRD已完成|Bug|修
 const META_COMMENTARY_PATTERNS = [
   /无法确认.*决策/,
   /未发现.*决策/,
+  /未达成.*决策/,
   /没有.*明确.*决策/,
   /insufficient\s+context/i,
   /no\s+explicit\s+decision/i,

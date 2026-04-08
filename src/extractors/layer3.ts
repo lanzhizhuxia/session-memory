@@ -378,18 +378,18 @@ function formatConversation(messages: Message[], maxMessages: number = 20): stri
 
 function computeDecisionHash(decision: Pick<Decision, 'what' | 'why' | 'alternatives' | 'trigger'>): string {
   return computeContentHash(JSON.stringify({
-    what: decision.what.trim(),
-    why: decision.why.trim(),
-    alternatives: decision.alternatives.map((item) => item.trim()),
-    trigger: decision.trigger.trim(),
+    what: (decision.what ?? '').trim(),
+    why: (decision.why ?? '').trim(),
+    alternatives: (decision.alternatives ?? []).map((item) => (item ?? '').trim()),
+    trigger: (decision.trigger ?? '').trim(),
   }));
 }
 
 function computePainPointHash(painPoint: Pick<PainPoint, 'problem' | 'diagnosis' | 'solution'>): string {
   return computeContentHash(JSON.stringify({
-    problem: painPoint.problem.trim(),
-    diagnosis: painPoint.diagnosis.trim(),
-    solution: painPoint.solution.trim(),
+    problem: (painPoint.problem ?? '').trim(),
+    diagnosis: (painPoint.diagnosis ?? '').trim(),
+    solution: (painPoint.solution ?? '').trim(),
   }));
 }
 

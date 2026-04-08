@@ -22,6 +22,14 @@ export function evaluateCandidate(candidate: SignalCandidate, evidence: Evidence
     return evaluateProfileFact(candidate, evidence);
   }
 
+  if (candidate.kind === 'decision') {
+    return evaluateDecision(candidate, evidence);
+  }
+
+  if (candidate.kind === 'pain_point') {
+    return evaluatePainPoint(candidate, evidence);
+  }
+
   return { candidateId: candidate.id, decision: 'accept', score: 50, issues: [] };
 }
 
@@ -386,6 +394,222 @@ export function evaluateProfileFact(candidate: SignalCandidate, evidence: Eviden
     candidateId: candidate.id,
     decision: pfDecision,
     score: Math.max(0, pfScore),
+    issues,
+  };
+}
+
+const MIN_DECISION_LENGTH = 8;
+const MAX_DECISION_LENGTH = 200;
+const MAX_DECISION_RATIONALE_LENGTH = 150;
+const GENERIC_DECISION_PATTERN = /^(做了优化|改了实现|优化了一下|调整了|处理了|改了|修了|弄了)$/;
+const DECISION_REJECT_TITLE_PATTERN = /^(问题|已修复|TODO|Review|PRD已完成|Bug|修复|完成|待处理|待办)$/i;
+
+export function evaluateDecision(candidate: SignalCandidate, evidence: EvidenceRecord[]): QualityGateResult {
+  if (candidate.kind !== 'decision') {
+    return {
+      candidateId: candidate.id,
+      decision: 'reject',
+      score: 0,
+      issues: [createIssue('missing_required', 'Candidate kind must be decision.')],
+    };
+  }
+
+  const issues: QualityIssue[] = [];
+  const { topic, decision, rationale, alternatives } = candidate.payload;
+  const trimmedDecision = decision.trim();
+  const trimmedRationale = rationale.trim();
+  const trimmedTopic = topic.trim();
+  const highestTrust = getHighestTrust(evidence);
+
+  if (trimmedTopic.length === 0) {
+    issues.push(createIssue('missing_required', 'topic is required.'));
+  }
+
+  if (trimmedDecision.length === 0) {
+    issues.push(createIssue('missing_required', 'decision must not be empty.'));
+  }
+
+  if (DECISION_REJECT_TITLE_PATTERN.test(trimmedDecision)) {
+    issues.push(createIssue('no_actionability', `decision is a status word, not a real decision: "${trimmedDecision}".`));
+  }
+
+  if (GENERIC_DECISION_PATTERN.test(trimmedDecision)) {
+    issues.push(createIssue('too_vague', `decision is too generic: "${trimmedDecision}".`));
+  }
+
+  if (trimmedDecision.length > 0 && trimmedDecision.length < MIN_DECISION_LENGTH) {
+    issues.push(createIssue('too_vague', `decision is too short (${trimmedDecision.length} chars < ${MIN_DECISION_LENGTH}).`));
+  }
+
+  if (trimmedDecision.length > MAX_DECISION_LENGTH) {
+    issues.push(createIssue('too_long', `decision exceeds ${MAX_DECISION_LENGTH} chars.`));
+  }
+
+  if (trimmedRationale.length === 0) {
+    issues.push(createIssue('missing_rationale', 'rationale must contain at least one specific reason.'));
+  }
+
+  if (trimmedRationale.length > MAX_DECISION_RATIONALE_LENGTH) {
+    issues.push(createIssue('too_long', `rationale exceeds ${MAX_DECISION_RATIONALE_LENGTH} chars.`));
+  }
+
+  if (lineBreakCount(trimmedRationale) > 2 || bulletCount(trimmedRationale) > 3) {
+    issues.push(createIssue('echo_raw_text', 'rationale contains raw text formatting.'));
+  }
+
+  const hasHighTrust = highestTrust >= 4;
+  const hasMultipleEvidence = evidence.length >= 2;
+  const hasClearSemantics = alternatives.length > 0 || (trimmedRationale.length >= 20 && trimmedDecision.length >= 15);
+  if (!hasHighTrust && !hasMultipleEvidence && !hasClearSemantics) {
+    issues.push(createIssue('weak_evidence', 'Decision needs trustScore >= 4, multiple evidence, or clear decision semantics.'));
+  }
+
+  if (evidence.length === 0) {
+    issues.push(createIssue('weak_evidence', 'No supporting evidence records were provided.'));
+  }
+
+  const dRejectCodes = new Set<QualityIssue['code']>(['missing_required', 'too_vague', 'missing_rationale', 'no_actionability']);
+  const dQuarantineCodes = new Set<QualityIssue['code']>(['echo_raw_text', 'too_long']);
+  const dMergeCodes = new Set<QualityIssue['code']>(['weak_evidence']);
+  let dScore = 100;
+
+  for (const issue of issues) {
+    switch (issue.code) {
+      case 'echo_raw_text':
+      case 'too_long':
+        dScore -= 45;
+        break;
+      case 'too_vague':
+      case 'missing_required':
+      case 'missing_rationale':
+      case 'no_actionability':
+        dScore -= 60;
+        break;
+      case 'weak_evidence':
+        dScore -= 20;
+        break;
+      default:
+        dScore -= 10;
+        break;
+    }
+  }
+
+  const dDecision = issues.some((issue) => dRejectCodes.has(issue.code))
+    ? 'reject'
+    : issues.some((issue) => dQuarantineCodes.has(issue.code))
+      ? 'quarantine'
+      : issues.some((issue) => dMergeCodes.has(issue.code))
+        ? 'needs_merge'
+        : 'accept';
+
+  return {
+    candidateId: candidate.id,
+    decision: dDecision,
+    score: Math.max(0, dScore),
+    issues,
+  };
+}
+
+const MIN_PROBLEM_LENGTH = 10;
+const MAX_PROBLEM_LENGTH = 200;
+const MAX_PP_DIAGNOSIS_LENGTH = 150;
+const MAX_PP_WORKAROUND_LENGTH = 150;
+const VAGUE_PROBLEM_PATTERN = /^(这里有点麻烦|有个问题|不太行|有bug|出错了|不好用|有点问题)$/i;
+
+export function evaluatePainPoint(candidate: SignalCandidate, evidence: EvidenceRecord[]): QualityGateResult {
+  if (candidate.kind !== 'pain_point') {
+    return {
+      candidateId: candidate.id,
+      decision: 'reject',
+      score: 0,
+      issues: [createIssue('missing_required', 'Candidate kind must be pain_point.')],
+    };
+  }
+
+  const issues: QualityIssue[] = [];
+  const { problem, diagnosis, workaround } = candidate.payload;
+  const trimmedProblem = problem.trim();
+  const trimmedDiagnosis = diagnosis?.trim() ?? '';
+  const trimmedWorkaround = workaround?.trim() ?? '';
+  const highestTrust = getHighestTrust(evidence);
+
+  if (trimmedProblem.length === 0) {
+    issues.push(createIssue('missing_required', 'problem must not be empty.'));
+  }
+
+  if (trimmedProblem.length > 0 && trimmedProblem.length < MIN_PROBLEM_LENGTH) {
+    issues.push(createIssue('too_vague', `problem is too short (${trimmedProblem.length} chars < ${MIN_PROBLEM_LENGTH}).`));
+  }
+
+  if (trimmedProblem.length > MAX_PROBLEM_LENGTH) {
+    issues.push(createIssue('too_long', `problem exceeds ${MAX_PROBLEM_LENGTH} chars.`));
+  }
+
+  if (VAGUE_PROBLEM_PATTERN.test(trimmedProblem)) {
+    issues.push(createIssue('too_vague', `problem is not a concrete engineering problem: "${trimmedProblem}".`));
+  }
+
+  if (trimmedDiagnosis.length === 0 && trimmedWorkaround.length === 0) {
+    issues.push(createIssue('missing_required', 'At least one of diagnosis or workaround is required.'));
+  }
+
+  if (trimmedDiagnosis.length > MAX_PP_DIAGNOSIS_LENGTH) {
+    issues.push(createIssue('too_long', `diagnosis exceeds ${MAX_PP_DIAGNOSIS_LENGTH} chars.`));
+  }
+
+  if (trimmedWorkaround.length > MAX_PP_WORKAROUND_LENGTH) {
+    issues.push(createIssue('too_long', `workaround exceeds ${MAX_PP_WORKAROUND_LENGTH} chars.`));
+  }
+
+  if (lineBreakCount(trimmedProblem) > 2 || bulletCount(trimmedProblem) > 3) {
+    issues.push(createIssue('echo_raw_text', 'problem contains raw text formatting.'));
+  }
+
+  if (evidence.length === 1 && highestTrust <= 2 && candidate.confidence < 0.6) {
+    issues.push(createIssue('single_occurrence_low_trust', 'Single low-trust complaint with no follow-up should not enter canonical layer.'));
+  }
+
+  if (evidence.length === 0) {
+    issues.push(createIssue('weak_evidence', 'No supporting evidence records were provided.'));
+  }
+
+  const ppRejectCodes = new Set<QualityIssue['code']>(['missing_required', 'too_vague', 'single_occurrence_low_trust']);
+  const ppQuarantineCodes = new Set<QualityIssue['code']>(['echo_raw_text', 'too_long']);
+  const ppMergeCodes = new Set<QualityIssue['code']>(['weak_evidence']);
+  let ppScore = 100;
+
+  for (const issue of issues) {
+    switch (issue.code) {
+      case 'echo_raw_text':
+      case 'too_long':
+        ppScore -= 45;
+        break;
+      case 'too_vague':
+      case 'missing_required':
+      case 'single_occurrence_low_trust':
+        ppScore -= 60;
+        break;
+      case 'weak_evidence':
+        ppScore -= 20;
+        break;
+      default:
+        ppScore -= 10;
+        break;
+    }
+  }
+
+  const ppDecision = issues.some((issue) => ppRejectCodes.has(issue.code))
+    ? 'reject'
+    : issues.some((issue) => ppQuarantineCodes.has(issue.code))
+      ? 'quarantine'
+      : issues.some((issue) => ppMergeCodes.has(issue.code))
+        ? 'needs_merge'
+        : 'accept';
+
+  return {
+    candidateId: candidate.id,
+    decision: ppDecision,
+    score: Math.max(0, ppScore),
     issues,
   };
 }

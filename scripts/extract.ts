@@ -26,10 +26,14 @@ import { CanonicalStore } from '../src/canonical/store.js';
 import { extractTechPreferenceCandidates } from '../src/canonical/extractors/tech-preference.js';
 import { extractWorkStyleCandidates } from '../src/canonical/extractors/work-style.js';
 import { extractProfileFactCandidates } from '../src/canonical/extractors/profile-fact.js';
+import { extractDecisionCandidates } from '../src/canonical/extractors/decision.js';
+import { extractPainPointCandidates } from '../src/canonical/extractors/pain-point.js';
 import { TECH_PREFS_BUDGET, compileTechPreferencesView } from '../src/canonical/views/tech-preferences.js';
 import { WORK_PROFILE_BUDGET, compileWorkProfileView } from '../src/canonical/views/work-profile.js';
+import { DECISIONS_BUDGET, compileDecisionsView } from '../src/canonical/views/decisions.js';
+import { PAIN_POINTS_BUDGET, compilePainPointsView } from '../src/canonical/views/pain-points.js';
 import type { QuarantineRecord } from '../src/canonical/store.js';
-import type { SignalCandidate, ViewBudget } from '../src/canonical/types.js';
+import type { SignalCandidate, ViewBudget, EvidenceRecord } from '../src/canonical/types.js';
 
 interface CanonicalTechSession extends Session {
   canonicalProjectPath?: string;
@@ -518,95 +522,86 @@ async function main(): Promise<void> {
       memoryTracking.memoryHashes,
     );
 
-    fs.writeFileSync(path.join(outputDir, '决策日志.md'), layer3Result.decisionsContent);
-    fs.writeFileSync(path.join(outputDir, '反复痛点.md'), layer3Result.painPointsContent);
-
     if (canonicalEnabled) {
-      console.log('  Canonical work_style pipeline...');
+      console.log('  Canonical decisions + pain_points + work_style pipeline...');
       const canonicalStore = new CanonicalStore(path.join(outputDir, '.state'));
       canonicalStore.load();
 
-      // Profile fact extraction (role, responsibilities, focus areas)
+      const runCanonicalPipeline = (extracted: { candidates: SignalCandidate[]; evidence: EvidenceRecord[] }, kind: string) => {
+        const evidenceById = new Map(extracted.evidence.map((e) => [e.id, e]));
+        const accepted: SignalCandidate[] = [];
+        const quarantined: QuarantineRecord[] = [];
+        for (const candidate of extracted.candidates) {
+          const ev = candidate.evidenceIds
+            .map((id) => evidenceById.get(id))
+            .filter((e): e is NonNullable<typeof e> => e != null);
+          const result = evaluateCandidate(candidate, ev);
+          if (result.decision === 'accept' || result.decision === 'needs_merge') {
+            accepted.push(candidate);
+          } else {
+            quarantined.push({ candidate, reasonCodes: result.issues.map((i) => i.code), createdAt: Date.now() });
+          }
+        }
+        const merge = mergeIntoStore(accepted, canonicalStore.getSignals(kind as any), kind as any);
+        canonicalStore.addEvidence(extracted.evidence);
+        canonicalStore.addSignals(merge.signals);
+        canonicalStore.addQuarantine([...quarantined, ...merge.quarantined.map((c) => ({
+          candidate: c, reasonCodes: ['merge_rejected'], createdAt: Date.now(),
+        }))]);
+        return { accepted: accepted.length, quarantined: quarantined.length, signals: merge.signals.length, candidates: extracted.candidates.length };
+      };
+
+      const decExtracted = extractDecisionCandidates(layer3Result.decisions, memorySignals.decisions);
+      const decStats = runCanonicalPipeline(decExtracted, 'decision');
+      console.log(`  Decisions: ${decStats.signals} canonical (${decStats.candidates} candidates, ${decStats.quarantined} quarantined)`);
+
+      const ppExtracted = extractPainPointCandidates(layer3Result.painPoints, memorySignals.painPoints);
+      const ppStats = runCanonicalPipeline(ppExtracted, 'pain_point');
+      console.log(`  Pain points: ${ppStats.signals} canonical (${ppStats.candidates} candidates, ${ppStats.quarantined} quarantined)`);
+
       const pfExtracted = extractProfileFactCandidates(
-        layer3Result.preferences,
-        layer3Result.decisions,
-        memorySignals.workProfile,
-        memorySignals.decisions,
+        layer3Result.preferences, layer3Result.decisions,
+        memorySignals.workProfile, memorySignals.decisions,
       );
+      const pfStats = runCanonicalPipeline(pfExtracted, 'profile_fact');
+      console.log(`  Profile facts: ${pfStats.signals} canonical (${pfStats.candidates} candidates, ${pfStats.quarantined} quarantined)`);
 
-      const pfEvidenceById = new Map(pfExtracted.evidence.map((e) => [e.id, e]));
-      const pfAccepted: SignalCandidate[] = [];
-      const pfQuarantined: QuarantineRecord[] = [];
+      const wsExtracted = extractWorkStyleCandidates(layer3Result.preferences, memorySignals.workProfile);
+      const wsStats = runCanonicalPipeline(wsExtracted, 'work_style');
+      console.log(`  Work styles: ${wsStats.signals} canonical (${wsStats.candidates} candidates, ${wsStats.quarantined} quarantined)`);
 
-      for (const candidate of pfExtracted.candidates) {
-        const ev = candidate.evidenceIds
-          .map((id) => pfEvidenceById.get(id))
-          .filter((e): e is NonNullable<typeof e> => e != null);
-        const result = evaluateCandidate(candidate, ev);
-        if (result.decision === 'accept' || result.decision === 'needs_merge') {
-          pfAccepted.push(candidate);
-        } else {
-          pfQuarantined.push({ candidate, reasonCodes: result.issues.map((i) => i.code), createdAt: Date.now() });
-        }
-      }
-
-      const pfMerge = mergeIntoStore(pfAccepted, canonicalStore.getSignals('profile_fact'), 'profile_fact');
-      canonicalStore.addEvidence(pfExtracted.evidence);
-      canonicalStore.addSignals(pfMerge.signals);
-      canonicalStore.addQuarantine([...pfQuarantined, ...pfMerge.quarantined.map((c) => ({
-        candidate: c, reasonCodes: ['merge_rejected'], createdAt: Date.now(),
-      }))]);
-      console.log(`  Profile facts: ${pfMerge.signals.length} canonical (${pfExtracted.candidates.length} candidates, ${pfQuarantined.length} quarantined)`);
-
-      // Work style extraction
-      const wsExtracted = extractWorkStyleCandidates(
-        layer3Result.preferences,
-        memorySignals.workProfile,
+      const existingDecisions = readFileIfExists(path.join(outputDir, '决策日志.md'));
+      const decisionsView = compileDecisionsView(
+        canonicalStore.getSignals('decision'), DECISIONS_BUDGET, sourceSummary, existingDecisions ?? undefined,
       );
+      fs.writeFileSync(path.join(outputDir, '决策日志.md'), decisionsView.markdown);
+      canonicalStore.upsertPublishedView(decisionsView);
+      console.log(`  Written: 决策日志.md (canonical, ${decisionsView.sourceSignalIds.length} signals)`);
 
-      const wsEvidenceById = new Map(wsExtracted.evidence.map((e) => [e.id, e]));
-      const wsAccepted: SignalCandidate[] = [];
-      const wsQuarantined: QuarantineRecord[] = [];
-
-      for (const candidate of wsExtracted.candidates) {
-        const ev = candidate.evidenceIds
-          .map((id) => wsEvidenceById.get(id))
-          .filter((e): e is NonNullable<typeof e> => e != null);
-        const result = evaluateCandidate(candidate, ev);
-        if (result.decision === 'accept' || result.decision === 'needs_merge') {
-          wsAccepted.push(candidate);
-        } else {
-          wsQuarantined.push({ candidate, reasonCodes: result.issues.map((i) => i.code), createdAt: Date.now() });
-        }
-      }
-
-      const wsMerge = mergeIntoStore(wsAccepted, canonicalStore.getSignals('work_style'), 'work_style');
-      canonicalStore.addEvidence(wsExtracted.evidence);
-      canonicalStore.addSignals(wsMerge.signals);
-      canonicalStore.addQuarantine([...wsQuarantined, ...wsMerge.quarantined.map((c) => ({
-        candidate: c, reasonCodes: ['merge_rejected'], createdAt: Date.now(),
-      }))]);
+      const existingPainPoints = readFileIfExists(path.join(outputDir, '反复痛点.md'));
+      const painPointsView = compilePainPointsView(
+        canonicalStore.getSignals('pain_point'), PAIN_POINTS_BUDGET, sourceSummary, existingPainPoints ?? undefined,
+      );
+      fs.writeFileSync(path.join(outputDir, '反复痛点.md'), painPointsView.markdown);
+      canonicalStore.upsertPublishedView(painPointsView);
+      console.log(`  Written: 反复痛点.md (canonical, ${painPointsView.sourceSignalIds.length} signals)`);
 
       const existingWorkProfile = readFileIfExists(path.join(outputDir, '工作画像.md'));
       const workProfileView = compileWorkProfileView(
-        canonicalStore.getSignals('work_style'),
-        canonicalStore.getSignals('profile_fact'),
-        canonicalStore.getSignals(),
-        WORK_PROFILE_BUDGET,
-        sourceSummary,
-        existingWorkProfile ?? undefined,
+        canonicalStore.getSignals('work_style'), canonicalStore.getSignals('profile_fact'),
+        canonicalStore.getSignals(), WORK_PROFILE_BUDGET, sourceSummary, existingWorkProfile ?? undefined,
       );
-
-      canonicalStore.upsertPublishedView(workProfileView);
-      canonicalStore.save();
-
       fs.writeFileSync(path.join(outputDir, '工作画像.md'), workProfileView.markdown);
+      canonicalStore.upsertPublishedView(workProfileView);
       console.log(`  Written: 工作画像.md (canonical, ${workProfileView.sourceSignalIds.length} signals)`);
+
+      canonicalStore.save();
     } else {
+      fs.writeFileSync(path.join(outputDir, '决策日志.md'), layer3Result.decisionsContent);
+      fs.writeFileSync(path.join(outputDir, '反复痛点.md'), layer3Result.painPointsContent);
       fs.writeFileSync(path.join(outputDir, '工作画像.md'), layer3Result.workProfileContent);
     }
 
-    console.log('  Written: 决策日志.md, 反复痛点.md');
     console.log(`  Decisions extracted: ${layer3Result.decisions.length}`);
     console.log(`  Pain points extracted: ${layer3Result.painPoints.length}`);
     console.log(`  Sessions processed by AI: ${layer3Result.processedSessionIds.length}`);

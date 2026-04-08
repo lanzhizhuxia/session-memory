@@ -40,29 +40,101 @@ function sortTimelineSignals(signals: TimelineSignal[]): TimelineSignal[] {
   ));
 }
 
+function clampDescription(text: string, maxChars: number = 40): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, maxChars - 1).trim()}…`;
+}
+
+function cleanSessionTitle(title: string): string {
+  return title
+    .replace(/^\[[^\]]+\]\s*/g, '')
+    .replace(/\((?:subagent|agent|retry|followup)[^)]+\)$/i, '')
+    .replace(/\b(?:subagent|agent|followup|retry)\b.*$/i, '')
+    .replace(/[|｜].*$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function scoreProjectThemes(titles: string[]): Map<string, number> {
+  const themeScores = new Map<string, number>();
+  const themePatterns: Array<{ label: string; pattern: RegExp }> = [
+    { label: 'AI 企业知识库助手', pattern: /知识库|knowledge\s*base|知识管理|knowledge\s*manage/i },
+    { label: '语音会议记录与转录', pattern: /转录|transcri|语音|whisper|说话人|speaker/i },
+    { label: '量化交易回测', pattern: /量化|quant|回测|backtest/i },
+    { label: '资金费率套利', pattern: /资金费率|funding\s*rate|套利|arbitrage/i },
+    { label: '交易基础设施', pattern: /交易系统|exchange|撮合|gateway|broker/i },
+    { label: '风控系统', pattern: /风控|risk\s*control|risk\s*manage/i },
+    { label: 'RWA 代币化', pattern: /\bRWA\b|代币化|tokeniz/i },
+    { label: 'AI Agent 工具链', pattern: /\bagent\b.*tool|opencode|davidbot/i },
+    { label: 'Meme 交易工具', pattern: /\bmeme\b|pump\.fun|four\.meme/i },
+    { label: '加密货币分析', pattern: /加密货币|crypto|区块链|blockchain|链上|on-?chain/i },
+    { label: 'PRD 产品管理', pattern: /\bPRD\b|产品需求|需求文档/i },
+  ];
+
+  for (const title of titles) {
+    for (const theme of themePatterns) {
+      if (theme.pattern.test(title)) {
+        themeScores.set(theme.label, (themeScores.get(theme.label) ?? 0) + 1);
+      }
+    }
+  }
+
+  return themeScores;
+}
+
+function deriveTitleKeywords(titles: string[]): string[] {
+  const stopWords = new Set(['the', 'and', 'for', 'with', 'from', 'project', 'task', 'issue', 'fix', 'update']);
+  const counts = new Map<string, number>();
+
+  for (const title of titles) {
+    const matches = title.match(/[A-Za-z]{3,}|[\u4e00-\u9fa5]{2,}/g) ?? [];
+    for (const match of matches) {
+      const token = match.trim();
+      const normalized = token.toLowerCase();
+      if (stopWords.has(normalized)) continue;
+      if (/^(today|tomorrow|session|unknown)$/i.test(token)) continue;
+      counts.set(token, (counts.get(token) ?? 0) + 1);
+    }
+  }
+
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, 3)
+    .map(([token]) => token);
+}
+
 function deriveProjectDescription(
   projectName: string,
   allSignals: CanonicalSignal[],
 ): string {
-  const projectSignals = allSignals
-    .filter((signal) => signal.status === 'active' && signal.projectNames.includes(projectName))
-    .sort((left, right) => right.trustScore - left.trustScore || right.supportCount - left.supportCount);
+  const titles = [...new Set(
+    allSignals
+      .filter((signal): signal is TimelineSignal => (
+        signal.status === 'active'
+        && signal.kind === 'timeline_event'
+        && signal.projectNames.includes(projectName)
+      ))
+      .map((signal) => cleanSessionTitle(signal.payload.title))
+      .filter((title) => title.length > 0),
+  )];
 
-  const snippets: string[] = [];
+  if (titles.length === 0) return clampDescription(projectName);
 
-  for (const signal of projectSignals) {
-    if (snippets.length >= 3) break;
-    if (signal.kind === 'decision') {
-      snippets.push(signal.payload.topic);
-    } else if (signal.kind === 'timeline_event' && signal.payload.eventType !== 'milestone') {
-      snippets.push(signal.payload.title);
-    }
+  const themeScores = [...scoreProjectThemes(titles).entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+
+  const themeLabels = themeScores.map(([label]) => label);
+  if (themeLabels.length > 0) {
+    return clampDescription(themeLabels.slice(0, 2).join('与'));
   }
 
-  if (snippets.length === 0) return '(unknown)';
+  const keywords = deriveTitleKeywords(titles);
+  if (keywords.length > 0) {
+    return clampDescription(keywords.join(' / '));
+  }
 
-  const desc = snippets.slice(0, 2).join(', ');
-  return desc.length <= 40 ? desc : `${desc.slice(0, 39).trim()}…`;
+  return clampDescription(projectName);
 }
 
 function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string): string {

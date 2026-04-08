@@ -14,6 +14,7 @@ import {
 
 const MAX_CLAIM_CHARS = 80;
 const MAX_RATIONALE_CHARS = 120;
+const MAX_ROLE_TITLE_CHARS = 20;
 
 /** Keywords signaling role/position in observation text. */
 const ROLE_KEYWORDS = /产品|开发|PM|engineer|量化|trader|前端|后端|全栈|设计|运营|研究|分析|manager|lead|架构|CTO|CEO|founder|负责人|技术总监|策略/i;
@@ -28,6 +29,38 @@ const FOCUS_AREA_KEYWORDS = /DeFi|套利|RWA|代币化|tokeniz|AI\s*Agent|知识
 const RAW_TEXT_LENGTH_THRESHOLD = 200;
 const MARKDOWN_NOISE_PATTERN = /```|^\s*[-*+]\s+.+\n\s*[-*+]\s+|^\|.*\|$/m;
 const AI_BEHAVIOR_PATTERN = /AI\s*助手|Claude|系统提示|model\s+behavior|system\s+prompt/i;
+const PROJECT_DESCRIPTION_PATTERN = /这个项目|本项目|项目的核心价值|项目价值/i;
+const LONG_SENTENCE_PATTERN = /[。！？；]/;
+const ROLE_SENTENCE_NOISE_PATTERN = /的|是|在|了|等/;
+const FOCUS_LEAD_IN_PATTERN = /^涉及.{8,}/;
+
+const FOCUS_DOMAIN_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
+  { label: 'DeFi 套利', pattern: /DeFi|套利|arbitrage|对冲/i },
+  { label: 'RWA 代币化', pattern: /RWA|代币化|tokeniz/i },
+  { label: 'AI Agent', pattern: /AI\s*Agent|智能代理/i },
+  { label: '量化交易', pattern: /量化交易|量化|quant|trading\s*system/i },
+  { label: '资金费率套利', pattern: /资金费率|funding\s*rate|funding\s*arb/i },
+  { label: '知识库', pattern: /知识库|knowledge\s*base|session.?memory/i },
+  { label: '企业内部工具', pattern: /内部工具|企业.*工具|internal\s*tool/i },
+  { label: '会议记录系统', pattern: /会议记录|会议.*转录|meeting.*record|voice.*secretary/i },
+  { label: '语音转录', pattern: /语音转录|whisper|transcri/i },
+  { label: '加密货币', pattern: /加密货币|crypto|区块链|blockchain|链上|on.?chain|web3/i },
+  { label: 'Meme 交易', pattern: /meme|pump\.fun|four\.meme/i },
+  { label: '风控', pattern: /风控|risk\s*control|risk\s*management/i },
+  { label: '交易基础设施', pattern: /交易系统|撮合|exchange|trading\s*infra|broker/i },
+];
+
+const RESPONSIBILITY_THEME_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
+  { label: '量化交易系统产品化', pattern: /量化|quant|trading|交易系统|回测|策略/i },
+  { label: '资金费率套利策略设计', pattern: /资金费率|funding|套利|arbitrage/i },
+  { label: '知识库助手建设', pattern: /知识库|knowledge\s*base|search|检索|PRD/i },
+  { label: 'AI 工具链建设', pattern: /AI\s*Agent|agent|opencode|davidbot|toolchain/i },
+  { label: '语音转录与会议记录', pattern: /转录|whisper|语音|会议/i },
+  { label: '风控体系建设', pattern: /风控|risk/i },
+  { label: 'RWA 代币化方案', pattern: /RWA|代币化|tokeniz/i },
+  { label: '交易基础设施建设', pattern: /撮合|交易基础设施|exchange|api|gateway/i },
+  { label: '企业内部工具落地', pattern: /内部工具|企业.*工具|bot|助手/i },
+];
 
 // ============================================================
 // Helpers
@@ -43,6 +76,51 @@ function isRawChatText(text: string): boolean {
   if (text.length > RAW_TEXT_LENGTH_THRESHOLD) return true;
   if (MARKDOWN_NOISE_PATTERN.test(text)) return true;
   return false;
+}
+
+function shouldRejectMemorySentence(text: string): boolean {
+  if (PROJECT_DESCRIPTION_PATTERN.test(text)) return true;
+  if (FOCUS_LEAD_IN_PATTERN.test(text)) return true;
+  if (LONG_SENTENCE_PATTERN.test(text)) return true;
+  return false;
+}
+
+function isClearRoleTitle(claim: string): boolean {
+  if (claim.length === 0 || claim.length > MAX_ROLE_TITLE_CHARS) return false;
+  if (claim.length > 30) return false;
+  if (ROLE_SENTENCE_NOISE_PATTERN.test(claim)) return false;
+  if (/[，,。:：；]/.test(claim)) return false;
+  return true;
+}
+
+function extractFocusDomainLabels(text: string): string[] {
+  const labels: string[] = [];
+  for (const domain of FOCUS_DOMAIN_PATTERNS) {
+    if (domain.pattern.test(text)) {
+      labels.push(domain.label);
+    }
+  }
+  return labels;
+}
+
+function inferResponsibilityTheme(project: string, texts: string[]): string | null {
+  const hits = RESPONSIBILITY_THEME_PATTERNS
+    .map((theme) => ({
+      label: theme.label,
+      count: texts.reduce((total, text) => total + (theme.pattern.test(text) ? 1 : 0), 0),
+    }))
+    .filter((theme) => theme.count > 0)
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+
+  if (hits.length > 0) {
+    return `${project} ${hits[0].label}`;
+  }
+
+  const conciseTheme = texts
+    .map((text) => text.trim())
+    .find((text) => text.length > 0 && text.length <= 24 && !shouldRejectMemorySentence(text));
+
+  return conciseTheme ? `${project} ${conciseTheme}` : null;
 }
 
 function buildEvidenceId(prefix: string, stableKey: string): string {
@@ -90,6 +168,8 @@ function extractRolesFromMemory(
     if (!ROLE_KEYWORDS.test(observation)) continue;
     if (isRawChatText(observation)) continue;
     if (AI_BEHAVIOR_PATTERN.test(observation)) continue;
+    if (shouldRejectMemorySentence(observation)) continue;
+    if (!isClearRoleTitle(observation)) continue;
 
     const trustScore: 1 | 2 | 3 | 4 | 5 = entry.sourceLabel === 'rule' ? 5 : 4;
 
@@ -206,6 +286,7 @@ function extractResponsibilitiesFromMemory(
     if (!RESPONSIBILITY_KEYWORDS.test(observation)) continue;
     if (isRawChatText(observation)) continue;
     if (AI_BEHAVIOR_PATTERN.test(observation)) continue;
+    if (shouldRejectMemorySentence(observation)) continue;
 
     const trustScore: 1 | 2 | 3 | 4 | 5 = entry.sourceLabel === 'rule' ? 5 : 4;
 
@@ -248,20 +329,19 @@ function inferResponsibilitiesFromDecisions(
   const evidence: EvidenceRecord[] = [];
 
   // Group decisions by project to infer per-project responsibility
-  const projectDecisions = new Map<string, { count: number; themes: Set<string> }>();
+  const projectDecisions = new Map<string, { count: number; themes: string[] }>();
 
   for (const d of layer3Decisions) {
     const project = d.projectName?.trim();
     if (!project) continue;
     if (!projectDecisions.has(project)) {
-      projectDecisions.set(project, { count: 0, themes: new Set() });
+      projectDecisions.set(project, { count: 0, themes: [] });
     }
     const entry = projectDecisions.get(project)!;
     entry.count++;
-    // Extract high-level theme from 'what'
     const what = d.what.trim();
     if (what.length > 0 && what.length <= 80) {
-      entry.themes.add(what);
+      entry.themes.push(what);
     }
   }
 
@@ -269,21 +349,27 @@ function inferResponsibilitiesFromDecisions(
     const project = md.projectName?.trim();
     if (!project) continue;
     if (!projectDecisions.has(project)) {
-      projectDecisions.set(project, { count: 0, themes: new Set() });
+      projectDecisions.set(project, { count: 0, themes: [] });
     }
     const entry = projectDecisions.get(project)!;
     entry.count++;
     const what = md.what.trim();
     if (what.length > 0 && what.length <= 80) {
-      entry.themes.add(what);
+      entry.themes.push(what);
     }
   }
 
-  // Only create responsibility facts for projects with enough decisions (stability signal)
-  for (const [project, data] of projectDecisions) {
-    if (data.count < 3) continue;
+  const topProjects = [...projectDecisions.entries()]
+    .filter(([, data]) => data.count >= 3)
+    .sort(([leftProject, left], [rightProject, right]) => (
+      right.count - left.count || leftProject.localeCompare(rightProject)
+    ))
+    .slice(0, 3);
 
-    const claim = `负责${project}项目方案推动和落地`;
+  for (const [project, data] of topProjects) {
+    const claim = inferResponsibilityTheme(project, data.themes);
+    if (claim == null) continue;
+
     const rationale = `${project}项目中有${data.count}条相关决策记录`;
 
     const evidenceId = buildEvidenceId('layer3-decision-resp', `${project}:${data.count}`);
@@ -337,22 +423,8 @@ function extractFocusAreasFromDecisions(
     allTexts.push(`${md.what} ${md.why ?? ''} ${md.trigger ?? ''}`);
   }
 
-  const domainPatterns: Array<{ label: string; pattern: RegExp }> = [
-    { label: 'DeFi 套利', pattern: /DeFi|套利|arbitrage|对冲/i },
-    { label: 'RWA 代币化', pattern: /RWA|代币化|tokeniz/i },
-    { label: 'AI Agent', pattern: /AI\s*Agent|智能代理/i },
-    { label: '量化交易', pattern: /量化交易|量化|quant|trading\s*system/i },
-    { label: '资金费率', pattern: /资金费率|funding\s*rate|funding\s*arb/i },
-    { label: '知识库', pattern: /知识库|knowledge\s*base|session.?memory/i },
-    { label: '企业内部工具', pattern: /内部工具|企业.*工具|internal\s*tool/i },
-    { label: '会议记录系统', pattern: /会议记录|会议.*转录|meeting.*record|voice.*secretary/i },
-    { label: '语音转录', pattern: /语音转录|whisper|transcri/i },
-    { label: '加密货币', pattern: /加密货币|crypto|区块链|blockchain|链上|on.?chain|web3/i },
-    { label: 'Meme 交易', pattern: /meme|pump\.fun|four\.meme/i },
-  ];
-
   for (const text of allTexts) {
-    for (const dp of domainPatterns) {
+    for (const dp of FOCUS_DOMAIN_PATTERNS) {
       if (dp.pattern.test(text)) {
         domainHits.set(dp.label, (domainHits.get(dp.label) ?? 0) + 1);
       }
@@ -408,35 +480,41 @@ function extractFocusAreasFromMemory(
     if (!FOCUS_AREA_KEYWORDS.test(observation)) continue;
     if (isRawChatText(observation)) continue;
     if (AI_BEHAVIOR_PATTERN.test(observation)) continue;
+    if (shouldRejectMemorySentence(observation) && extractFocusDomainLabels(observation).length === 0) continue;
+
+    const domains = extractFocusDomainLabels(observation);
+    if (domains.length === 0) continue;
 
     const trustScore: 1 | 2 | 3 | 4 | 5 = entry.sourceLabel === 'rule' ? 5 : 4;
 
-    const evidenceId = buildEvidenceId('memory-profile-focus', `${entry.stableId}:${observation}`);
-    const evidenceRecord: EvidenceRecord = {
-      id: evidenceId,
-      sourceKind: 'memory_file',
-      sourceLabel: entry.sourceLabel,
-      filePath: entry.sourcePath,
-      content: observation,
-      contentHash: computeContentHash(`focus:${entry.stableId}:${observation}`),
-      capturedAt: Date.now(),
-      trustScore,
-      recencyScore: 1,
-      extractionHints: ['profile-fact', 'focus_area'],
-      metadata: { stableId: entry.stableId },
-    };
+    for (const domain of domains) {
+      const evidenceId = buildEvidenceId('memory-profile-focus', `${entry.stableId}:${domain}`);
+      const evidenceRecord: EvidenceRecord = {
+        id: evidenceId,
+        sourceKind: 'memory_file',
+        sourceLabel: entry.sourceLabel,
+        filePath: entry.sourcePath,
+        content: observation,
+        contentHash: computeContentHash(`focus:${entry.stableId}:${domain}`),
+        capturedAt: Date.now(),
+        trustScore,
+        recencyScore: 1,
+        extractionHints: ['profile-fact', 'focus_area'],
+        metadata: { stableId: entry.stableId, domain },
+      };
 
-    const payload: ProfileFactPayload = {
-      dimension: 'focus_area',
-      claim: clamp(observation, MAX_CLAIM_CHARS),
-      scope: 'global',
-      rationale: entry.evidence && entry.evidence !== observation
-        ? clamp(entry.evidence, MAX_RATIONALE_CHARS)
-        : undefined,
-    };
+      const payload: ProfileFactPayload = {
+        dimension: 'focus_area',
+        claim: domain,
+        scope: 'global',
+        rationale: entry.evidence && entry.evidence !== observation
+          ? clamp(entry.evidence, MAX_RATIONALE_CHARS)
+          : undefined,
+      };
 
-    evidence.push(evidenceRecord);
-    candidates.push(buildCandidateFromPayload(payload, evidenceRecord, 'canonical-layer0-memory-profile-fact', 0.8));
+      evidence.push(evidenceRecord);
+      candidates.push(buildCandidateFromPayload(payload, evidenceRecord, 'canonical-layer0-memory-profile-fact', 0.8));
+    }
   }
 
   return { candidates, evidence };
@@ -456,32 +534,38 @@ function extractFocusAreasFromPreferences(
     if (observation.length === 0) continue;
     if (isRawChatText(observation)) continue;
     if (AI_BEHAVIOR_PATTERN.test(observation)) continue;
+    if (shouldRejectMemorySentence(observation) && extractFocusDomainLabels(observation).length === 0) continue;
 
-    const evidenceId = buildEvidenceId('layer3-pref-focus', `${pref.category}:${observation}`);
-    const evidenceRecord: EvidenceRecord = {
-      id: evidenceId,
-      sourceKind: 'session_message',
-      sourceLabel: 'layer3-ai',
-      content: observation,
-      contentHash: computeContentHash(`focus-pref:${pref.category}:${observation}`),
-      capturedAt: Date.now(),
-      trustScore: 3,
-      recencyScore: 0.7,
-      extractionHints: ['profile-fact', 'focus_area'],
-      metadata: { originalCategory: pref.category },
-    };
+    const domains = extractFocusDomainLabels(observation);
+    if (domains.length === 0) continue;
 
-    const payload: ProfileFactPayload = {
-      dimension: 'focus_area',
-      claim: clamp(observation, MAX_CLAIM_CHARS),
-      scope: 'global',
-      rationale: pref.evidence && pref.evidence !== observation
-        ? clamp(pref.evidence, MAX_RATIONALE_CHARS)
-        : undefined,
-    };
+    for (const domain of domains) {
+      const evidenceId = buildEvidenceId('layer3-pref-focus', `${pref.category}:${domain}`);
+      const evidenceRecord: EvidenceRecord = {
+        id: evidenceId,
+        sourceKind: 'session_message',
+        sourceLabel: 'layer3-ai',
+        content: observation,
+        contentHash: computeContentHash(`focus-pref:${pref.category}:${domain}`),
+        capturedAt: Date.now(),
+        trustScore: 3,
+        recencyScore: 0.7,
+        extractionHints: ['profile-fact', 'focus_area'],
+        metadata: { originalCategory: pref.category, domain },
+      };
 
-    evidence.push(evidenceRecord);
-    candidates.push(buildCandidateFromPayload(payload, evidenceRecord, 'canonical-layer3-bridge-profile-fact', 0.65));
+      const payload: ProfileFactPayload = {
+        dimension: 'focus_area',
+        claim: domain,
+        scope: 'global',
+        rationale: pref.evidence && pref.evidence !== observation
+          ? clamp(pref.evidence, MAX_RATIONALE_CHARS)
+          : undefined,
+      };
+
+      evidence.push(evidenceRecord);
+      candidates.push(buildCandidateFromPayload(payload, evidenceRecord, 'canonical-layer3-bridge-profile-fact', 0.65));
+    }
   }
 
   return { candidates, evidence };

@@ -29,9 +29,33 @@ function effectiveTimestamp(signal: CanonicalSignal): number {
   return signal.lastSeenAt;
 }
 
+function creationTimestamp(signal: CanonicalSignal): number {
+  return signal.firstSeenAt;
+}
+
 function isWithinDays(signal: CanonicalSignal, days: number, now: number): boolean {
   const ts = effectiveTimestamp(signal);
   return (now - ts) <= days * MS_PER_DAY;
+}
+
+function wasCreatedWithinDays(signal: CanonicalSignal, days: number, now: number): boolean {
+  return (now - creationTimestamp(signal)) <= days * MS_PER_DAY;
+}
+
+function hasNamedProject(signal: CanonicalSignal): boolean {
+  return signal.projectNames.length > 0 && signal.projectNames[0].length > 0;
+}
+
+function hasRecentProjectTimelineActivity(
+  projectName: string,
+  signals: CanonicalSignal[],
+  now: number,
+): boolean {
+  return signals.some((signal): signal is TimelineSignal => (
+    signal.kind === 'timeline_event'
+    && signal.projectNames.includes(projectName)
+    && isWithinDays(signal, 7, now)
+  ));
 }
 
 function hasCompletionSemantics(signal: TimelineSignal): boolean {
@@ -85,18 +109,22 @@ export function compileWeeklyFocusView(
   const inProgress = sortByRelevance(
     activeSignals
       .filter((signal): signal is OpenThreadSignal => signal.kind === 'open_thread')
-      .filter((signal) => isWithinDays(signal, 3, nowMs)),
+      .filter(hasNamedProject)
+      .filter((signal) => wasCreatedWithinDays(signal, 7, nowMs))
+      .filter((signal) => hasRecentProjectTimelineActivity(signal.projectNames[0], activeSignals, nowMs)),
   ).slice(0, maxPerSection);
 
   const completed = sortByRelevance(
     activeSignals
       .filter((signal): signal is TimelineSignal => signal.kind === 'timeline_event')
+      .filter(hasNamedProject)
       .filter((signal) => isWithinDays(signal, 7, nowMs) && hasCompletionSemantics(signal)),
   ).slice(0, maxPerSection);
 
   const decisions = sortByRelevance(
     activeSignals
       .filter((signal): signal is DecisionSignal => signal.kind === 'decision')
+      .filter(hasNamedProject)
       .filter((signal) => isWithinDays(signal, 7, nowMs)),
   ).slice(0, maxPerSection);
 

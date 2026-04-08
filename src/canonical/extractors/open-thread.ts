@@ -36,6 +36,7 @@ export function extractOpenThreadCandidates(
     const evidenceId = computeContentHash(stableKey);
 
     const now = Date.now();
+    const capturedAt = todo.timeCreated ?? now;
     const todayStr = new Date(now).toISOString().slice(0, 10);
 
     const evidenceRecord: EvidenceRecord = {
@@ -47,7 +48,7 @@ export function extractOpenThreadCandidates(
       todoId: evidenceId,
       content: title,
       contentHash: computeContentHash(title),
-      capturedAt: todo.timeCreated ?? now,
+      capturedAt,
       observedAt: todayStr,
       trustScore: 2,
       recencyScore: 1,

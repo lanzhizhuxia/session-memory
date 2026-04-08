@@ -443,7 +443,7 @@ export async function runLayer3(
   const failedIds: string[] = [];
 
   // Process in batches of 5
-  const batchSize = config.batch_size ?? 20;
+  const batchSize = config.batch_size ?? 30;
   for (let i = 0; i < candidates.length; i += batchSize) {
     const batch = candidates.slice(i, i + batchSize);
     console.log(`  Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(candidates.length / batchSize)} (${batch.length} sessions)...`);

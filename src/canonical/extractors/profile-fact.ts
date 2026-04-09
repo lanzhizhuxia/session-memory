@@ -30,7 +30,7 @@ export interface ProfileFactAIContext {
 
 const MAX_CLAIM_CHARS = 80;
 const MAX_RATIONALE_CHARS = 120;
-const MAX_ROLE_TITLE_CHARS = 20;
+const MAX_ROLE_TITLE_CHARS = 30;
 
 /** Keywords signaling role/position in observation text. */
 const ROLE_KEYWORDS = /产品|开发|PM|engineer|量化|trader|前端|后端|全栈|设计|运营|研究|分析|manager|lead|架构|CTO|CEO|founder|负责人|技术总监|策略/i;
@@ -638,18 +638,20 @@ Extract a structured profile from these observations. Output ONLY valid JSON, no
 
 Schema:
 {
-  "role": "stable 6-12 month professional role, max 20 chars",
+  "role": "specific professional role with domain qualifier, max 20 chars, e.g. 加密交易产品经理, 量化策略开发者",
   "responsibilities": ["2-3 recurring responsibilities, each max 30 chars"],
   "focus_areas": ["3-5 short domain labels, each max 15 chars"]
 }
 
 Rules:
-- role must be a stable professional identity over 6-12 months, NOT a current task, project description, or one-off goal
+- role must be a SPECIFIC professional identity that reflects the user's actual domain, NOT generic titles like 产品经理 or 开发者
+- role should include domain qualifiers: e.g. 加密交易产品经理, DeFi量化开发者, 交易所产品+量化复合角色
+- if the user works across multiple domains (product + development + trading), express it as a compound role
 - responsibilities must describe recurring responsibilities, NOT this week's concrete tasks
 - do not mention concrete project names in role or responsibilities
 - do not use execution-task verbs such as 验证, 修复, 处理, 跟进, 推进, 上线 in role
 - focus_areas must be short domain labels, NOT sentences
-- infer from the combined context and observations, do not copy-paste raw text
+- infer from the combined context (projects, decisions, domain distribution), do not copy-paste raw text
 - if evidence is insufficient, omit the field instead of guessing`;
 
 interface AIProfileResult {
@@ -721,11 +723,13 @@ async function callProfileAI(
 }
 
 function isValidRole(role: string, projectNames: string[]): boolean {
-  if (role.length === 0 || role.length > 20) return false;
+  if (role.length === 0 || role.length > MAX_ROLE_TITLE_CHARS) return false;
   if (LONG_SENTENCE_PATTERN.test(role)) return false;
   if (PROJECT_DESCRIPTION_PATTERN.test(role)) return false;
   if (ROLE_TASK_VERB_PATTERN.test(role)) return false;
   if (containsProjectName(role, projectNames)) return false;
+  const TOO_GENERIC = /^(产品经理|开发者|工程师|设计师|PM|engineer|developer)$/i;
+  if (TOO_GENERIC.test(role.trim())) return false;
   return true;
 }
 

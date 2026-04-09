@@ -40,7 +40,7 @@ function sortOpenThreadSignals(signals: OpenThreadSignal[]): OpenThreadSignal[] 
   return [...signals].sort((left, right) => {
     const statusDiff = (STATUS_ORDER[left.payload.status] ?? 9) - (STATUS_ORDER[right.payload.status] ?? 9);
     if (statusDiff !== 0) return statusDiff;
-    return right.lastSeenAt - left.lastSeenAt
+    return right.firstSeenAt - left.firstSeenAt
       || right.trustScore - left.trustScore
       || right.supportCount - left.supportCount
       || left.id.localeCompare(right.id);
@@ -78,7 +78,11 @@ export function compileOpenThreadsView(
     grouped.set(project, list);
   }
 
-  const sortedProjectNames = [...grouped.keys()].sort((left, right) => left.localeCompare(right));
+  const sortedProjectNames = [...grouped.keys()].sort((left, right) => {
+    const leftLatest = Math.max(...(grouped.get(left) ?? []).map((s) => s.firstSeenAt));
+    const rightLatest = Math.max(...(grouped.get(right) ?? []).map((s) => s.firstSeenAt));
+    return rightLatest - leftLatest || left.localeCompare(right);
+  });
 
   const sections: PublishedViewSection[] = [];
   const sourceSignalIds: string[] = [];

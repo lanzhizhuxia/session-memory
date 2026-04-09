@@ -72,21 +72,65 @@ export function compileTimelineView(
     grouped.set(project, list);
   }
 
-  const sortedProjectNames = [...grouped.keys()].sort((left, right) => left.localeCompare(right));
+  const sortedProjectNames = [...grouped.keys()]
+    .sort((left, right) => (grouped.get(right)?.length ?? 0) - (grouped.get(left)?.length ?? 0));
+
+  const maxItemsTotal = budget.maxItemsTotal ?? 80;
+  const minPerProject = 3;
+  const projectCount = sortedProjectNames.length;
+  const userNotes = extractUserNotes(existingContent) ?? DEFAULT_USER_NOTES;
+
+  const perProjectBudget = new Map<string, number>();
+  if (projectCount * minPerProject <= maxItemsTotal) {
+    let remaining = maxItemsTotal;
+    for (const name of sortedProjectNames) {
+      perProjectBudget.set(name, minPerProject);
+      remaining -= minPerProject;
+    }
+    const totalSignals = filtered.length;
+    for (const name of sortedProjectNames) {
+      if (remaining <= 0) break;
+      const projectSize = grouped.get(name)?.length ?? 0;
+      const proportionalShare = totalSignals > 0
+        ? Math.floor((projectSize / totalSignals) * remaining)
+        : 0;
+      const extra = Math.min(proportionalShare, projectSize - minPerProject, remaining);
+      if (extra > 0) {
+        perProjectBudget.set(name, (perProjectBudget.get(name) ?? minPerProject) + extra);
+        remaining -= extra;
+      }
+    }
+    if (remaining > 0) {
+      for (const name of sortedProjectNames) {
+        if (remaining <= 0) break;
+        const current = perProjectBudget.get(name) ?? minPerProject;
+        const projectSize = grouped.get(name)?.length ?? 0;
+        const canAdd = Math.min(projectSize - current, remaining);
+        if (canAdd > 0) {
+          perProjectBudget.set(name, current + canAdd);
+          remaining -= canAdd;
+        }
+      }
+    }
+  } else {
+    for (const name of sortedProjectNames) {
+      perProjectBudget.set(name, Math.max(1, Math.floor(maxItemsTotal / projectCount)));
+    }
+  }
 
   const sections: PublishedViewSection[] = [];
   const sourceSignalIds: string[] = [];
-  const maxItemsTotal = budget.maxItemsTotal ?? 80;
-  const userNotes = extractUserNotes(existingContent) ?? DEFAULT_USER_NOTES;
-  let itemsWritten = 0;
+  let totalItemsWritten = 0;
 
   for (const projectName of sortedProjectNames) {
-    if (itemsWritten >= maxItemsTotal) break;
+    if (totalItemsWritten >= maxItemsTotal) break;
 
     const projectSignals = grouped.get(projectName) ?? [];
+    const projectMax = perProjectBudget.get(projectName) ?? minPerProject;
     const desc = projectDescriptions.get(projectName) ?? '(unknown)';
     const sectionLines = [`## ${projectName}`, `<!-- desc: ${desc} -->`];
     const sectionSignalIds: string[] = [];
+    let projectItemsWritten = 0;
 
     const byDate = new Map<string, TimelineSignal[]>();
     for (const signal of projectSignals) {
@@ -99,13 +143,13 @@ export function compileTimelineView(
     const sortedDates = [...byDate.keys()].sort((left, right) => right.localeCompare(left));
 
     for (const date of sortedDates) {
-      if (itemsWritten >= maxItemsTotal) break;
+      if (projectItemsWritten >= projectMax || totalItemsWritten >= maxItemsTotal) break;
 
       const dateSignals = byDate.get(date) ?? [];
       sectionLines.push(`### ${date}`);
 
       for (const signal of dateSignals) {
-        if (itemsWritten >= maxItemsTotal) break;
+        if (projectItemsWritten >= projectMax || totalItemsWritten >= maxItemsTotal) break;
 
         const sourceLabel = signal.sourceLabels.length > 0 ? signal.sourceLabels[0] : 'unknown';
         const line = `- [${sourceLabel}] ${signal.payload.title}`;
@@ -122,7 +166,8 @@ export function compileTimelineView(
         sectionLines.push(line);
         sectionSignalIds.push(signal.id);
         sourceSignalIds.push(signal.id);
-        itemsWritten++;
+        projectItemsWritten++;
+        totalItemsWritten++;
       }
     }
 

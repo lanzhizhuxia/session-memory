@@ -54,10 +54,10 @@ const ROLE_TASK_VERB_PATTERN = /验证|修复|处理|跟进|推进|上线/;
 const FOCUS_DOMAIN_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
   { label: 'DeFi 套利', pattern: /DeFi|套利|arbitrage|对冲/i },
   { label: 'RWA 代币化', pattern: /RWA|代币化|tokeniz/i },
-  { label: 'AI Agent', pattern: /AI\s*Agent|智能代理/i },
+  { label: 'AI 工具链', pattern: /\bLLM\b|MCP|multi.?agent|toolchain|RAG|prompt\s*engineer|\bGPT\b|opencode|openclaw|智能代理|AI\s*Agent/i },
   { label: '量化交易', pattern: /量化交易|量化|quant|trading\s*system/i },
   { label: '资金费率套利', pattern: /资金费率|funding\s*rate|funding\s*arb/i },
-  { label: '知识库', pattern: /知识库|knowledge\s*base|session.?memory/i },
+  { label: '知识库', pattern: /知识库|knowledge\s*base|知识检索|知识助手/i },
   { label: '企业内部工具', pattern: /内部工具|企业.*工具|internal\s*tool/i },
   { label: '会议记录系统', pattern: /会议记录|会议.*转录|meeting.*record|voice.*secretary/i },
   { label: '语音转录', pattern: /语音转录|whisper|transcri/i },
@@ -71,7 +71,7 @@ const RESPONSIBILITY_THEME_PATTERNS: Array<{ label: string; pattern: RegExp }> =
   { label: '量化交易系统产品化', pattern: /量化|quant|trading|交易系统|回测|策略/i },
   { label: '资金费率套利策略设计', pattern: /资金费率|funding|套利|arbitrage/i },
   { label: '知识库助手建设', pattern: /知识库|knowledge\s*base|search|检索|PRD/i },
-  { label: 'AI 工具链建设', pattern: /AI\s*Agent|agent|opencode|davidbot|toolchain/i },
+  { label: 'AI 工具链建设', pattern: /\bLLM\b|MCP|multi.?agent|agent|opencode|openclaw|davidbot|toolchain|RAG|智能代理|知识助手/i },
   { label: '语音转录与会议记录', pattern: /转录|whisper|语音|会议/i },
   { label: '风控体系建设', pattern: /风控|risk/i },
   { label: 'RWA 代币化方案', pattern: /RWA|代币化|tokeniz/i },
@@ -170,17 +170,31 @@ function buildProfileAIUserInput(
   observations: string[],
   context: ProfileFactAIContext,
 ): string {
+  const focusHitsSorted = [...context.focusAreaHits.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8);
+  const aiRelatedCount = focusHitsSorted
+    .filter(([label]) => /AI|LLM|MCP|agent|toolchain|知识库/i.test(label))
+    .reduce((sum, [, count]) => sum + count, 0);
+  const totalHits = focusHitsSorted.reduce((sum, [, count]) => sum + count, 0);
+
   const lines = [
-    '你正在分析一个人的长期工作画像。根据以下信息，推断此人的稳定职业身份。',
+    '你正在分析一个人的长期工作画像。根据以下所有信息源，推断此人的完整职业身份。',
+    '注意：记忆文件可能不完整，请务必结合项目分布、决策主题和领域分布做综合判断。',
     '',
     '工作记录摘要（过去 6-12 个月）：',
     `- 活跃项目：${context.projectNames.length > 0 ? context.projectNames.join(', ') : '(none)'}`,
     `- 主要决策主题：${context.decisionTopics.length > 0 ? context.decisionTopics.join('，') : '(none)'}`,
     `- 领域分布：${formatFocusAreaHits(context.focusAreaHits)}`,
-    '',
-    '用户记忆文件中的观察：',
-    ...observations.map((observation, index) => `${index + 1}. ${observation}`),
   ];
+
+  if (totalHits > 0 && aiRelatedCount > 0) {
+    const aiPercent = Math.round((aiRelatedCount / totalHits) * 100);
+    lines.push(`- AI/工具链相关决策占比：约 ${aiPercent}%`);
+  }
+
+  lines.push('', '用户记忆文件中的观察：');
+  lines.push(...observations.map((observation, index) => `${index + 1}. ${observation}`));
 
   return lines.join('\n');
 }
@@ -276,18 +290,21 @@ function inferRoleFromDecisions(
 
   // Classify decisions by domain
   const productKeywords = /产品|PRD|需求|用户体验|布局|UI|UX|交互|功能|模块|页面|feature|triage|schedule/i;
-  const techKeywords = /架构|重构|迁移|部署|数据库|schema|API|性能|算法|模型|SDK|pipeline|encoding|分轨|转录/i;
+  const techKeywords = /架构|重构|迁移|部署|数据库|schema|API|性能|算法|SDK|pipeline|encoding|分轨|转录/i;
   const quantKeywords = /量化|套利|资金费率|funding|对冲|hedge|交易|trading|持仓|仓位|做市|Binance|DEX|swap/i;
+  const aiKeywords = /\bLLM\b|MCP|agent|multi.?agent|toolchain|RAG|prompt|opencode|openclaw|知识库|assistant|智能|模型路由|embedding/i;
 
   let productCount = 0;
   let techCount = 0;
   let quantCount = 0;
+  let aiCount = 0;
 
   for (const d of decisions) {
     const combined = `${d.what} ${d.why} ${d.trigger}`;
     if (productKeywords.test(combined)) productCount++;
     if (techKeywords.test(combined)) techCount++;
     if (quantKeywords.test(combined)) quantCount++;
+    if (aiKeywords.test(combined)) aiCount++;
   }
 
   const total = decisions.length;
@@ -296,11 +313,12 @@ function inferRoleFromDecisions(
   if (productCount / total >= 0.2) roleParts.push('产品经理');
   if (techCount / total >= 0.2) roleParts.push('开发者');
   if (quantCount / total >= 0.1) roleParts.push('量化开发者');
+  if (aiCount / total >= 0.1) roleParts.push('AI工具链开发者');
 
   if (roleParts.length === 0) return { candidates, evidence };
 
   const roleClaim = roleParts.join('兼');
-  const rationale = `基于${total}条决策记录推断：产品${productCount}条、技术${techCount}条、量化${quantCount}条`;
+  const rationale = `基于${total}条决策记录推断：产品${productCount}条、技术${techCount}条、量化${quantCount}条、AI${aiCount}条`;
 
   const evidenceId = buildEvidenceId('layer3-decision-role', roleClaim);
   const evidenceRecord: EvidenceRecord = {
@@ -638,21 +656,22 @@ Extract a structured profile from these observations. Output ONLY valid JSON, no
 
 Schema:
 {
-  "role": "specific professional role with domain qualifier, max 20 chars, e.g. 加密交易产品经理, 量化策略开发者",
+  "role": "specific compound role with domain qualifiers, max 30 chars, e.g. 加密交易产品经理兼AI工具链开发者",
   "responsibilities": ["2-3 recurring responsibilities, each max 30 chars"],
   "focus_areas": ["3-5 short domain labels, each max 15 chars"]
 }
 
 Rules:
-- role must be a SPECIFIC professional identity that reflects the user's actual domain, NOT generic titles like 产品经理 or 开发者
-- role should include domain qualifiers: e.g. 加密交易产品经理, DeFi量化开发者, 交易所产品+量化复合角色
-- if the user works across multiple domains (product + development + trading), express it as a compound role
+- IMPORTANT: Memory observations may be incomplete. You MUST weigh ALL evidence sources equally:
+  project distribution, decision topics, AND domain distribution, not just memory text.
+- role must reflect ALL major dimensions of the user's work, expressed as a compound identity
+  e.g. if user does both crypto product management AND AI toolchain development, say both
+- role must include domain qualifiers, NOT generic titles like bare 产品经理 or 开发者
 - responsibilities must describe recurring responsibilities, NOT this week's concrete tasks
 - do not mention concrete project names in role or responsibilities
 - do not use execution-task verbs such as 验证, 修复, 处理, 跟进, 推进, 上线 in role
-- focus_areas must be short domain labels, NOT sentences
-- infer from the combined context (projects, decisions, domain distribution), do not copy-paste raw text
-- if evidence is insufficient, omit the field instead of guessing`;
+- focus_areas must cover ALL major work domains visible in the evidence, not just the loudest one
+- if evidence is insufficient for any field, omit it instead of guessing`;
 
 interface AIProfileResult {
   role?: string;

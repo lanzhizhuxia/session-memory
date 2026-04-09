@@ -103,7 +103,16 @@ function buildCoreProfileFields(
   const primaryResponsibilities = responsibilities.slice(0, 2).map((s) => s.payload.claim);
   const secondaryResponsibilities = responsibilities.slice(2, 4).map((s) => s.payload.claim);
 
-  const focusAreas = focuses.slice(0, 5).map((s) => s.payload.claim);
+  const rawFocusAreas = focuses.slice(0, 15).map((s) => s.payload.claim);
+  const seenNormalized = new Set<string>();
+  const focusAreas: string[] = [];
+  for (const area of rawFocusAreas) {
+    const normalized = area.replace(/\s+/g, '').toLowerCase();
+    if (seenNormalized.has(normalized)) continue;
+    seenNormalized.add(normalized);
+    focusAreas.push(area);
+    if (focusAreas.length >= 10) break;
+  }
 
   const activeProjects = computeActiveProjects(allSignals, now);
 

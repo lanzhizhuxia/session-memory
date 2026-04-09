@@ -52,19 +52,20 @@ const FOCUS_LEAD_IN_PATTERN = /^涉及.{8,}/;
 const ROLE_TASK_VERB_PATTERN = /验证|修复|处理|跟进|推进|上线/;
 
 const FOCUS_DOMAIN_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
-  { label: 'DeFi 套利', pattern: /DeFi|套利|arbitrage|对冲/i },
-  { label: 'RWA 代币化', pattern: /RWA|代币化|tokeniz/i },
+  { label: 'DeFi', pattern: /DeFi|套利|arbitrage|对冲|DEX|swap|流动性挖矿|liquidity/i },
+  { label: 'RWA 代币化', pattern: /RWA|代币化|tokeniz|Ondo|美股.*链上|链上.*美股|coin.*stock|stock.*token/i },
   { label: 'AI 工具链', pattern: /\bLLM\b|MCP|multi.?agent|toolchain|RAG|prompt\s*engineer|\bGPT\b|opencode|openclaw|智能代理|AI\s*Agent/i },
-  { label: '量化交易', pattern: /量化交易|量化|quant|trading\s*system/i },
+  { label: '量化交易', pattern: /量化交易|量化|quant|trading\s*system|回测|backtest/i },
   { label: '资金费率套利', pattern: /资金费率|funding\s*rate|funding\s*arb/i },
   { label: '知识库', pattern: /知识库|knowledge\s*base|知识检索|知识助手/i },
-  { label: '企业内部工具', pattern: /内部工具|企业.*工具|internal\s*tool/i },
-  { label: '会议记录系统', pattern: /会议记录|会议.*转录|meeting.*record|voice.*secretary/i },
+  { label: '预测市场', pattern: /预测市场|prediction\s*market|polymarket|forecast/i },
+  { label: '个人能效工具', pattern: /session.?memory|数字分身|个人工具|能效工具|productivity|笔记|转录|会议记录/i },
   { label: '语音转录', pattern: /语音转录|whisper|transcri/i },
   { label: '加密货币', pattern: /加密货币|crypto|区块链|blockchain|链上|on.?chain|web3/i },
   { label: 'Meme 交易', pattern: /meme|pump\.fun|four\.meme/i },
   { label: '风控', pattern: /风控|risk\s*control|risk\s*management/i },
-  { label: '交易基础设施', pattern: /交易系统|撮合|exchange|trading\s*infra|broker/i },
+  { label: '交易基础设施', pattern: /交易系统|撮合|exchange|trading\s*infra|broker|保证金/i },
+  { label: '项目管理', pattern: /PRD|需求文档|项目管理|OKR|roadmap|里程碑|milestone|sprint/i },
 ];
 
 const RESPONSIBILITY_THEME_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
@@ -161,7 +162,6 @@ function containsProjectName(text: string, projectNames: string[]): boolean {
 function formatFocusAreaHits(focusAreaHits: Map<string, number>): string {
   const items = [...focusAreaHits.entries()]
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-    .slice(0, 8)
     .map(([label, count]) => `${label}(${count}次)`);
   return items.length > 0 ? items.join('，') : '(none)';
 }
@@ -656,9 +656,9 @@ Extract a structured profile from these observations. Output ONLY valid JSON, no
 
 Schema:
 {
-  "role": "specific compound role with domain qualifiers, max 30 chars, e.g. 加密交易产品经理兼AI工具链开发者",
+  "role": "specific compound role with domain qualifiers, max 30 chars, e.g. 区块链产品经理兼AI工具链开发者",
   "responsibilities": ["2-3 recurring responsibilities, each max 30 chars"],
-  "focus_areas": ["3-5 short domain labels, each max 15 chars"]
+  "focus_areas": ["5-8 short domain labels, each max 15 chars, must cover ALL major work domains"]
 }
 
 Rules:
@@ -670,7 +670,8 @@ Rules:
 - responsibilities must describe recurring responsibilities, NOT this week's concrete tasks
 - do not mention concrete project names in role or responsibilities
 - do not use execution-task verbs such as 验证, 修复, 处理, 跟进, 推进, 上线 in role
-- focus_areas must cover ALL major work domains visible in the evidence, not just the loudest one
+- focus_areas must include ALL domains that appear in the evidence, even low-frequency ones
+- focus_areas are better too many than too few — downstream consumers need comprehensive coverage
 - if evidence is insufficient for any field, omit it instead of guessing`;
 
 interface AIProfileResult {
@@ -816,7 +817,7 @@ async function extractProfileFactsWithAI(
   }
 
   if (result.focus_areas != null) {
-    for (const area of result.focus_areas.slice(0, 5)) {
+    for (const area of result.focus_areas.slice(0, 8)) {
       if (!isValidFocusArea(area)) continue;
       const payload: ProfileFactPayload = {
         dimension: 'focus_area',
@@ -825,6 +826,19 @@ async function extractProfileFactsWithAI(
       };
       candidates.push(buildCandidateFromPayload(payload, evidenceRecord, 'canonical-ai-semantic-profile-fact', 0.85));
     }
+  }
+
+  const aiFocusSet = new Set((result.focus_areas ?? []).map((a) => a.trim().toLowerCase()));
+  for (const [label, count] of context.focusAreaHits.entries()) {
+    if (count < 2) continue;
+    if (aiFocusSet.has(label.trim().toLowerCase())) continue;
+    if (!isValidFocusArea(label)) continue;
+    const payload: ProfileFactPayload = {
+      dimension: 'focus_area',
+      claim: clamp(label, MAX_CLAIM_CHARS),
+      scope: 'global',
+    };
+    candidates.push(buildCandidateFromPayload(payload, evidenceRecord, 'canonical-ai-semantic-profile-fact-supplement', 0.7));
   }
 
   return { candidates, evidence };

@@ -34,10 +34,11 @@ layer3:
   enabled: true             # 设为 false 跳过 AI 提取
   min_score: 3              # 加权分数 ≥ 此值进入 AI 分析
   max_sessions: 500         # 单次运行上限（safety cap）
-  batch_size: 15            # 每批并发 session 数（默认 15，每 session 3 AI 调用 = 峰值 45 并发）
+  batch_size: 30            # 每批并发 session 数（默认 30，每 session 3 AI 调用 = 峰值 90 并发）
   # api_key: "sk-..."       # 或设置 ANTHROPIC_API_KEY 环境变量
-  # api_base_url: "https://api.anthropic.com"  # 自定义 API 端点
-  # model: "claude-haiku-4-5-20251001"          # 默认用 Haiku（成本低）
+  # api_base_url: "http://localhost:14265"  # LiteLLM proxy 或其他 OpenAI 兼容端点
+  # model: "gpt-5.4-mini"                   # 提取模型（默认 gpt-5.4-mini）
+  # consolidation_model: "gpt-5.4-mini"     # 合并去重模型
 
 # --- 输出 ---
 output_dir: "~/.local/share/session-memory"

@@ -4,8 +4,8 @@
 
 - 版本: v0.2 (Oracle reviewed)
 - 日期: 2026-04-09
-- 状态: Approved
-- 关联: PRD-canonical-signal-pipeline.md (v0.2) §4.5
+- 状态: Implemented
+- 关联: PRD-canonical-signal-pipeline.md (v0.3) §4.5
 - 审核: Oracle v0.1 NEEDS REVISION → v0.2 已修订
 
 ---

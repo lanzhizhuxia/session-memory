@@ -1,9 +1,9 @@
 # PRD: Canonical Signal Pipeline 架构重设计
 > session-memory 从「文件中心」到「信号中心」的根本性架构升级
 
-- 版本: v0.2
-- 日期: 2026-04-08
-- 状态: Draft
+- 版本: v0.3
+- 日期: 2026-04-09
+- 状态: Implemented (Phase 1-4 complete)
 - 关联: 主 PRD (PRD.md), Memory PRD (PRD-memory-integration.md)
 
 ---

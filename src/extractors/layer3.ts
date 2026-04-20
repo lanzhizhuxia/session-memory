@@ -864,8 +864,8 @@ function renderDecisions(decisions: Decision[], sourceSummary: string, _existing
     lines.push(`## ${project}`);
     lines.push('');
 
-    // Sort by date
-    decs.sort((a, b) => a.date.localeCompare(b.date));
+    // Sort by date (guard against missing date from AI consolidation)
+    decs.sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''));
 
     for (const d of decs) {
       lines.push(`### ${d.date}: ${d.what}`);

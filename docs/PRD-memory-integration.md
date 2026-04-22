@@ -2,13 +2,13 @@
 
 Date: 2026-04-07
 Version: v0.3
-Status: Draft
+Status: Partially Implemented (Phase 3A complete)
 
 ---
 
 ## 0. 一句话
 
-> 将 OpenCode 和 Claude Code 已生成的记忆文件（auto memory、rules、session notes）作为零成本数据源接入 session-memory，通过新增的 Layer 0 直接合并到现有 7 个输出文件中，同时降低 Layer 3 的提取成本。
+> 将 OpenCode 和 Claude Code 已生成的记忆文件（auto memory、rules、session notes）作为零成本数据源接入 session-memory，通过新增的 Layer 0 直接合并到现有 **8 个输出文件**中，同时降低 Layer 3 的提取成本。
 
 ---
 
@@ -459,7 +459,7 @@ Memory 文件和 Layer 3 从原始对话中提取的内容可能重叠。
 
 ### 5.2 不新增输出文件
 
-记忆数据的接入不引入第 8 个输出文件。现有 7 个文件的结构和格式（见主 PRD §6）保持不变，只是新增了来自 memory 的条目，通过标签标明来源。
+记忆数据的接入不引入新的输出文件。现有 8 个文件的结构和格式（见主 PRD §6）保持不变，只是部分文件新增了来自 memory 的条目，通过标签标明来源。
 
 ### 5.3 格式示例
 

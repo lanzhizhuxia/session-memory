@@ -21,7 +21,9 @@ session-memory 把这些对话变成 **8 个结构化的 markdown 文件**，构
 ├── 技术偏好.md          # 跨项目技术偏好（框架/工具/部署）
 ├── 工作模式.md          # 高频任务类型 + 时段分布 + 首条消息模式
 ├── .state/              # Canonical signal store（信号/证据/隔离区）
-└── .last-extraction.json  # 增量提取 checkpoint
+├── .last-extraction.json  # 增量提取 checkpoint
+├── .noise-report.json     # 噪音过滤报告
+└── cron.log               # 定时提取运行日志
 ```
 
 ## 架构
@@ -44,7 +46,7 @@ session-memory 把这些对话变成 **8 个结构化的 markdown 文件**，构
 | Layer 2 | 文本匹配 + 技术检测 | 极低 | 工作模式、技术偏好 |
 | Layer 3 | AI 批量提取 + 合并 | 低 | 决策日志、反复痛点、工作画像 |
 
-Layer 3 使用 gpt-5.4-mini 提取（batch=30，峰值 90 并发），gpt-5.4-mini 合并去重。
+Layer 3 使用可配置模型提取（默认 anthropic/claude-haiku-4.5，可通过 config.yaml 覆盖为 gpt-5.4-mini 等；batch=30，峰值 90 并发），合并去重模型同样可配置。
 工作画像的核心画像由 AI 语义提取器生成（一次调用，综合 memory + 决策 + 项目分布）。
 项目描述由 AI batch 调用生成（render-time metadata，不存储）。
 

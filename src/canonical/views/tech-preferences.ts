@@ -1,4 +1,5 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
+import { cleanEvidence, finalizeMarkdownWithinBudget, localizeStance } from './view-text.js';
 
 const CATEGORY_ORDER = ['前端', '后端', 'AI', '工具', '部署'];
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
@@ -117,10 +118,12 @@ function renderLine(group: AggregatedTechPreference): string {
   const representative = group.representative;
   const projectCount = new Set(group.signals.flatMap((signal) => signal.projectNames)).size;
   const supportCount = group.signals.reduce((sum, signal) => sum + signal.supportCount, 0);
-  const rationale = sanitizeRationale(representative.payload.rationale);
+  const rationale = cleanEvidence(sanitizeRationale(representative.payload.rationale), 100);
   const scopeSuffix = projectCount > 1 ? `, ${projectCount} 个项目` : '';
   const stance = displayStance(group);
-  return `- **${representative.payload.technology}** (${stance}): ${rationale} — *${supportCount} 条证据${scopeSuffix}, 信任度 ${representative.trustScore}*`;
+  return rationale.length > 0
+    ? `- **${representative.payload.technology}** (${localizeStance(stance)}): ${rationale} — *${supportCount} 条证据${scopeSuffix}, 信任度 ${representative.trustScore}*`
+    : `- **${representative.payload.technology}** (${localizeStance(stance)}) — *${supportCount} 条证据${scopeSuffix}, 信任度 ${representative.trustScore}*`;
 }
 
 function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string): string {
@@ -222,15 +225,15 @@ export function compileTechPreferencesView(
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = `${header}`.slice(0, budget.maxChars).trimEnd() + '\n';
+    markdown = finalizeMarkdownWithinBudget(header, '', budget.maxChars);
     finalSections = [];
     finalSignalIds = [];
   }
 
-  const finalizedMarkdown = markdown.endsWith('\n') ? markdown : `${markdown}\n`;
-  const boundedMarkdown = finalizedMarkdown.length <= budget.maxChars
-    ? finalizedMarkdown
-    : finalizedMarkdown.slice(0, budget.maxChars);
+  const sectionMarkdown = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
+  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${userNotes}\n` : `\n${userNotes}\n`;
+  const finalized = finalizeMarkdownWithinBudget(header, body, budget.maxChars);
+  const boundedMarkdown = finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 
   return {
     viewId: budget.viewId,

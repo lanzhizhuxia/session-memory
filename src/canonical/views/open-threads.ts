@@ -1,4 +1,12 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
+import {
+  cleanProjectName,
+  cleanTitle,
+  finalizeMarkdownWithinBudget,
+  formatDateLabel,
+  formatRelativeStaleness,
+  localizeStatus,
+} from './view-text.js';
 
 type OpenThreadSignal = Extract<CanonicalSignal, { kind: 'open_thread' }>;
 
@@ -6,8 +14,8 @@ const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备�
 
 const STATUS_ORDER: Record<string, number> = {
   in_progress: 0,
-  open: 1,
-  blocked: 2,
+  blocked: 1,
+  open: 2,
 };
 
 export const OPEN_THREADS_BUDGET: ViewBudget = {
@@ -40,17 +48,18 @@ function sortOpenThreadSignals(signals: OpenThreadSignal[]): OpenThreadSignal[] 
   return [...signals].sort((left, right) => {
     const statusDiff = (STATUS_ORDER[left.payload.status] ?? 9) - (STATUS_ORDER[right.payload.status] ?? 9);
     if (statusDiff !== 0) return statusDiff;
-    return right.firstSeenAt - left.firstSeenAt
+    return right.lastSeenAt - left.lastSeenAt
       || right.trustScore - left.trustScore
       || right.supportCount - left.supportCount
       || left.id.localeCompare(right.id);
   });
 }
 
-function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string): string {
+function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string, maxChars: number): string {
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n` : '\n';
-  return `${header}${body}${userNotes}\n`;
+  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${userNotes}\n` : `\n${userNotes}\n`;
+  const finalized = finalizeMarkdownWithinBudget(header, body, maxChars);
+  return finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 }
 
 function fitsBudget(markdown: string, budget: ViewBudget): boolean {
@@ -72,18 +81,19 @@ export function compileOpenThreadsView(
 
   const grouped = new Map<string, OpenThreadSignal[]>();
   for (const signal of filtered) {
-    const project = signal.projectNames.length > 0 && signal.projectNames[0].length > 0 ? signal.projectNames[0] : 'unknown';
+    const project = cleanProjectName(signal.projectNames[0]);
     const list = grouped.get(project) ?? [];
     list.push(signal);
     grouped.set(project, list);
   }
 
   const sortedProjectNames = [...grouped.keys()].sort((left, right) => {
-    const leftLatest = Math.max(...(grouped.get(left) ?? []).map((s) => s.firstSeenAt));
-    const rightLatest = Math.max(...(grouped.get(right) ?? []).map((s) => s.firstSeenAt));
+    const leftLatest = Math.max(...(grouped.get(left) ?? []).map((signal) => signal.lastSeenAt));
+    const rightLatest = Math.max(...(grouped.get(right) ?? []).map((signal) => signal.lastSeenAt));
     return rightLatest - leftLatest || left.localeCompare(right);
   });
 
+  const statusOrder: Array<OpenThreadSignal['payload']['status']> = ['in_progress', 'blocked', 'open'];
   const sections: PublishedViewSection[] = [];
   const sourceSignalIds: string[] = [];
   const maxItemsTotal = budget.maxItemsTotal ?? 60;
@@ -96,58 +106,73 @@ export function compileOpenThreadsView(
     const projectSignals = grouped.get(projectName) ?? [];
     const sectionLines = [`## ${projectName}`];
     const sectionSignalIds: string[] = [];
+    let projectItemsWritten = 0;
 
-    for (const signal of projectSignals) {
-      if (itemsWritten >= maxItemsTotal) break;
+    for (const status of statusOrder) {
+      if (projectItemsWritten >= 10 || itemsWritten >= maxItemsTotal) break;
+      const statusSignals = projectSignals.filter((signal) => signal.payload.status === status);
+      if (statusSignals.length === 0) continue;
 
-      const line = `- [${signal.payload.status}] ${signal.payload.title}`;
+      const remainingForProject = 10 - projectItemsWritten;
+      const visibleSignals = statusSignals.slice(0, remainingForProject);
+      const statusLines: string[] = [];
+      const statusSignalIds: string[] = [];
 
-      const candidateSectionLines = [...sectionLines, line];
-      const candidateSignalIds = [...sectionSignalIds, signal.id];
-      const candidateSections = [
-        ...sections,
-        { title: projectName, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
-      ];
-      const candidateMarkdown = buildMarkdown(header, candidateSections, userNotes);
-      if (!fitsBudget(candidateMarkdown, budget)) break;
+      for (const signal of visibleSignals) {
+        if (itemsWritten >= maxItemsTotal) break;
+        const staleness = formatRelativeStaleness(signal.lastSeenAt, generatedAt);
+        const line = `- ${formatDateLabel(signal.lastSeenAt)} · ${cleanTitle(signal.payload.title)}${staleness ? `（${staleness}）` : ''}`;
+        const candidateSectionLines = [
+          ...sectionLines,
+          `### ${localizeStatus(status)}`,
+          ...statusLines,
+          line,
+        ];
+        const candidateSignalIds = [...sectionSignalIds, ...statusSignalIds, signal.id];
+        const candidateSections = [
+          ...sections,
+          { title: projectName, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
+        ];
+        if (!fitsBudget(buildMarkdown(header, candidateSections, userNotes, budget.maxChars), budget)) break;
 
-      sectionLines.push(line);
-      sectionSignalIds.push(signal.id);
-      sourceSignalIds.push(signal.id);
-      itemsWritten++;
+        statusLines.push(line);
+        statusSignalIds.push(signal.id);
+        sourceSignalIds.push(signal.id);
+        itemsWritten++;
+        projectItemsWritten++;
+      }
+
+      if (statusLines.length === 0) continue;
+      sectionLines.push(`### ${localizeStatus(status)}`);
+      sectionLines.push(...statusLines);
+      sectionSignalIds.push(...statusSignalIds);
+
+      const overflow = statusSignals.length - statusLines.length;
+      if (overflow > 0 && projectItemsWritten < 10) {
+        sectionLines.push(`- 另有 ${overflow} 项未展开`);
+      }
     }
 
     if (sectionSignalIds.length === 0) continue;
-
     sections.push({ title: projectName, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
   }
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set(sourceSignalIds));
-  let markdown = buildMarkdown(header, finalSections, userNotes);
+  let markdown = buildMarkdown(header, finalSections, userNotes, budget.maxChars);
 
   while (finalSections.length > 0 && !fitsBudget(markdown, budget)) {
     const removed = finalSections.pop();
     const removedIds = new Set(removed?.signalIds ?? []);
     finalSignalIds = finalSignalIds.filter((id) => !removedIds.has(id));
-    markdown = buildMarkdown(header, finalSections, userNotes);
+    markdown = buildMarkdown(header, finalSections, userNotes, budget.maxChars);
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES);
-    finalSignalIds = [];
-  }
-
-  if (!fitsBudget(markdown, budget)) {
-    markdown = `${header}`.slice(0, budget.maxChars).trimEnd() + '\n';
     finalSections = [];
     finalSignalIds = [];
+    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES, budget.maxChars);
   }
-
-  const finalizedMarkdown = markdown.endsWith('\n') ? markdown : `${markdown}\n`;
-  const boundedMarkdown = finalizedMarkdown.length <= budget.maxChars
-    ? finalizedMarkdown
-    : finalizedMarkdown.slice(0, budget.maxChars);
 
   return {
     viewId: budget.viewId,
@@ -156,6 +181,6 @@ export function compileOpenThreadsView(
     sourceSignalIds: finalSignalIds,
     budget,
     sections: finalSections,
-    markdown: boundedMarkdown,
+    markdown,
   };
 }

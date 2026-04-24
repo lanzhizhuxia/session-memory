@@ -9,6 +9,18 @@ import type { AdapterRegistry } from '../adapters/registry.js';
 import type { NoiseFilter } from '../utils/noise-filter.js';
 import type { MemoryTechPreference } from '../memory/types.js';
 
+const EXAMPLE_NOISE_PATTERNS = [
+  /^\s*\[(?:INFO|DEBUG|WARN(?:ING)?|ERROR|TRACE)/i,
+  /^\s*<local-command-caveat>/i,
+  /<\/?local-command-caveat>/i,
+];
+
+function isHighQualityExample(input: string | null | undefined): boolean {
+  const value = String(input ?? '').replace(/\s+/g, ' ').trim();
+  if (value.length < 10) return false;
+  return !EXAMPLE_NOISE_PATTERNS.some((pattern) => pattern.test(value));
+}
+
 // ============================================================
 // Task type classification — PRD §5.3.1
 // ============================================================
@@ -226,8 +238,9 @@ export async function runLayer2(
       if (fmp.test(msgContent)) {
         const entry = firstMsgCounts.get(fmp.pattern) ?? { count: 0 };
         entry.count++;
-        if (!entry.example) {
-          entry.example = msgContent.slice(0, 80).replace(/\n/g, ' ');
+        const example = msgContent.slice(0, 80).replace(/\n/g, ' ');
+        if (!entry.example && isHighQualityExample(example)) {
+          entry.example = example;
         }
         firstMsgCounts.set(fmp.pattern, entry);
         patternMatched = true;

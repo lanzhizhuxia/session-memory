@@ -1,4 +1,11 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
+import {
+  cleanProjectName,
+  cleanTitle,
+  cleanViewText,
+  finalizeMarkdownWithinBudget,
+  shouldHideAsNoise,
+} from './view-text.js';
 
 type TimelineSignal = Extract<CanonicalSignal, { kind: 'timeline_event' }>;
 
@@ -30,9 +37,14 @@ function isTimelineSignal(signal: CanonicalSignal): signal is TimelineSignal {
   return signal.kind === 'timeline_event';
 }
 
+function timelineTimestamp(signal: TimelineSignal): number {
+  const parsed = Date.parse(signal.payload.date);
+  return Number.isNaN(parsed) ? signal.lastSeenAt : parsed;
+}
+
 function sortTimelineSignals(signals: TimelineSignal[]): TimelineSignal[] {
   return [...signals].sort((left, right) => (
-    right.payload.date.localeCompare(left.payload.date)
+    timelineTimestamp(right) - timelineTimestamp(left)
     || right.trustScore - left.trustScore
     || right.supportCount - left.supportCount
     || right.lastSeenAt - left.lastSeenAt
@@ -40,10 +52,18 @@ function sortTimelineSignals(signals: TimelineSignal[]): TimelineSignal[] {
   ));
 }
 
+function isLowValueTimelineEntry(title: string): boolean {
+  return /^(?:Explore|Inspect|Research|Search|Find|Look|Read|Check|Investigate)\b/i.test(title)
+    || /^(?:hello|hi|test|测试|Tell me about yourself)$/i.test(title)
+    || /^\[TEAM_STATUS\]/.test(title)
+    || /^Oracle\b.*\breview\b/i.test(title);
+}
+
 function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string): string {
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n` : '\n';
-  return `${header}${body}${userNotes}\n`;
+  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${userNotes}\n` : `\n${userNotes}\n`;
+  const finalized = finalizeMarkdownWithinBudget(header, body, TIMELINE_BUDGET.maxChars);
+  return finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 }
 
 function fitsBudget(markdown: string, budget: ViewBudget): boolean {
@@ -60,20 +80,39 @@ export function compileTimelineView(
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
   const header = fileHeader('项目时间线', sourceSummary, now);
-  const filtered = sortTimelineSignals(
-    signals.filter((signal) => signal.status === 'active').filter(isTimelineSignal),
+  const activeTimelineSignals = sortTimelineSignals(
+    signals
+      .filter((signal) => signal.status === 'active')
+      .filter(isTimelineSignal)
+      .filter((signal) => !shouldHideAsNoise(signal.payload.title)),
   );
 
   const grouped = new Map<string, TimelineSignal[]>();
-  for (const signal of filtered) {
-    const project = signal.projectNames.length > 0 && signal.projectNames[0].length > 0 ? signal.projectNames[0] : 'unknown';
+  for (const signal of activeTimelineSignals) {
+    const project = cleanProjectName(signal.projectNames[0]);
     const list = grouped.get(project) ?? [];
     list.push(signal);
     grouped.set(project, list);
   }
 
-  const sortedProjectNames = [...grouped.keys()]
-    .sort((left, right) => (grouped.get(right)?.length ?? 0) - (grouped.get(left)?.length ?? 0));
+  const filteredGrouped = new Map<string, TimelineSignal[]>();
+  for (const [projectName, projectSignals] of grouped) {
+    const description = cleanViewText(projectDescriptions.get(projectName));
+    const lowValueSignals = projectSignals.filter((signal) => isLowValueTimelineEntry(cleanTitle(signal.payload.title)));
+    const highValueSignals = projectSignals.filter((signal) => !isLowValueTimelineEntry(cleanTitle(signal.payload.title)));
+    if (highValueSignals.length === 0 && (description.length === 0 || description === '(unknown)')) {
+      continue;
+    }
+    filteredGrouped.set(projectName, highValueSignals.length > 0 ? [...highValueSignals, ...lowValueSignals.slice(0, 1)] : projectSignals.slice(0, 1));
+  }
+
+  const sortedProjectNames = [...filteredGrouped.keys()].sort((left, right) => {
+    const leftSignals = filteredGrouped.get(left) ?? [];
+    const rightSignals = filteredGrouped.get(right) ?? [];
+    const leftLatest = Math.max(...leftSignals.map(timelineTimestamp));
+    const rightLatest = Math.max(...rightSignals.map(timelineTimestamp));
+    return rightLatest - leftLatest || rightSignals.length - leftSignals.length || left.localeCompare(right);
+  });
 
   const maxItemsTotal = budget.maxItemsTotal ?? 80;
   const minPerProject = 3;
@@ -87,13 +126,11 @@ export function compileTimelineView(
       perProjectBudget.set(name, minPerProject);
       remaining -= minPerProject;
     }
-    const totalSignals = filtered.length;
+    const totalSignals = [...filteredGrouped.values()].reduce((sum, signalsForProject) => sum + signalsForProject.length, 0);
     for (const name of sortedProjectNames) {
       if (remaining <= 0) break;
-      const projectSize = grouped.get(name)?.length ?? 0;
-      const proportionalShare = totalSignals > 0
-        ? Math.floor((projectSize / totalSignals) * remaining)
-        : 0;
+      const projectSize = filteredGrouped.get(name)?.length ?? 0;
+      const proportionalShare = totalSignals > 0 ? Math.floor((projectSize / totalSignals) * remaining) : 0;
       const extra = Math.min(proportionalShare, projectSize - minPerProject, remaining);
       if (extra > 0) {
         perProjectBudget.set(name, (perProjectBudget.get(name) ?? minPerProject) + extra);
@@ -104,7 +141,7 @@ export function compileTimelineView(
       for (const name of sortedProjectNames) {
         if (remaining <= 0) break;
         const current = perProjectBudget.get(name) ?? minPerProject;
-        const projectSize = grouped.get(name)?.length ?? 0;
+        const projectSize = filteredGrouped.get(name)?.length ?? 0;
         const canAdd = Math.min(projectSize - current, remaining);
         if (canAdd > 0) {
           perProjectBudget.set(name, current + canAdd);
@@ -125,10 +162,13 @@ export function compileTimelineView(
   for (const projectName of sortedProjectNames) {
     if (totalItemsWritten >= maxItemsTotal) break;
 
-    const projectSignals = grouped.get(projectName) ?? [];
+    const projectSignals = filteredGrouped.get(projectName) ?? [];
     const projectMax = perProjectBudget.get(projectName) ?? minPerProject;
-    const desc = projectDescriptions.get(projectName) ?? '(unknown)';
-    const sectionLines = [`## ${projectName}`, `<!-- desc: ${desc} -->`];
+    const description = cleanViewText(projectDescriptions.get(projectName));
+    const sectionLines = [`## ${projectName}`];
+    if (description.length > 0 && description !== '(unknown)') {
+      sectionLines.push(`> ${description}`);
+    }
     const sectionSignalIds: string[] = [];
     let projectItemsWritten = 0;
 
@@ -141,38 +181,40 @@ export function compileTimelineView(
     }
 
     const sortedDates = [...byDate.keys()].sort((left, right) => right.localeCompare(left));
-
     for (const date of sortedDates) {
       if (projectItemsWritten >= projectMax || totalItemsWritten >= maxItemsTotal) break;
 
       const dateSignals = byDate.get(date) ?? [];
-      sectionLines.push(`### ${date}`);
+      const dateLines: string[] = [];
+      const dateSignalIds: string[] = [];
 
       for (const signal of dateSignals) {
         if (projectItemsWritten >= projectMax || totalItemsWritten >= maxItemsTotal) break;
 
-        const sourceLabel = signal.sourceLabels.length > 0 ? signal.sourceLabels[0] : 'unknown';
-        const line = `- [${sourceLabel}] ${signal.payload.title}`;
-
-        const candidateSectionLines = [...sectionLines, line];
-        const candidateSignalIds = [...sectionSignalIds, signal.id];
+        const line = `- ${cleanTitle(signal.payload.title)}`;
+        const candidateSectionLines = [...sectionLines, `### ${date}`, ...dateLines, line];
+        const candidateSignalIds = [...sectionSignalIds, ...dateSignalIds, signal.id];
         const candidateSections = [
           ...sections,
           { title: projectName, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
         ];
-        const candidateMarkdown = buildMarkdown(header, candidateSections, userNotes);
-        if (!fitsBudget(candidateMarkdown, budget)) break;
+        if (!fitsBudget(buildMarkdown(header, candidateSections, userNotes), budget)) break;
 
-        sectionLines.push(line);
-        sectionSignalIds.push(signal.id);
+        dateLines.push(line);
+        dateSignalIds.push(signal.id);
         sourceSignalIds.push(signal.id);
         projectItemsWritten++;
         totalItemsWritten++;
       }
+
+      if (dateLines.length > 0) {
+        sectionLines.push(`### ${date}`);
+        sectionLines.push(...dateLines);
+        sectionSignalIds.push(...dateSignalIds);
+      }
     }
 
     if (sectionSignalIds.length === 0) continue;
-
     sections.push({ title: projectName, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
   }
 
@@ -188,20 +230,14 @@ export function compileTimelineView(
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES);
-    finalSignalIds = [];
-  }
-
-  if (!fitsBudget(markdown, budget)) {
-    markdown = `${header}`.slice(0, budget.maxChars).trimEnd() + '\n';
     finalSections = [];
     finalSignalIds = [];
+    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES);
   }
 
-  const finalizedMarkdown = markdown.endsWith('\n') ? markdown : `${markdown}\n`;
-  const boundedMarkdown = finalizedMarkdown.length <= budget.maxChars
-    ? finalizedMarkdown
-    : finalizedMarkdown.slice(0, budget.maxChars);
+  const finalMarkdown = fitsBudget(markdown, budget)
+    ? markdown
+    : finalizeMarkdownWithinBudget(header, `\n${userNotes}\n`, budget.maxChars);
 
   return {
     viewId: budget.viewId,
@@ -210,6 +246,6 @@ export function compileTimelineView(
     sourceSignalIds: finalSignalIds,
     budget,
     sections: finalSections,
-    markdown: boundedMarkdown,
+    markdown: finalMarkdown.endsWith('\n') ? finalMarkdown : `${finalMarkdown}\n`,
   };
 }

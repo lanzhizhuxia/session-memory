@@ -1,4 +1,5 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
+import { cleanProjectName, cleanTitle, cleanViewText, finalizeMarkdownWithinBudget, formatDateLabel } from './view-text.js';
 
 type TimelineSignal = Extract<CanonicalSignal, { kind: 'timeline_event' }>;
 type OpenThreadSignal = Extract<CanonicalSignal, { kind: 'open_thread' }>;
@@ -63,20 +64,32 @@ function hasCompletionSemantics(signal: TimelineSignal): boolean {
   return COMPLETION_PATTERN.test(signal.payload.title);
 }
 
+function cleanReason(input: string | null | undefined): string {
+  return cleanViewText(input);
+}
+
 function formatItem(signal: CanonicalSignal): string {
-  const projectName = signal.projectNames.length > 0 && signal.projectNames[0].length > 0 ? signal.projectNames[0] : 'unknown';
+  const projectName = cleanProjectName(signal.projectNames[0]);
+  const dateLabel = signal.kind === 'decision'
+    ? formatDateLabel(signal.payload.trigger ?? signal.lastSeenAt)
+    : signal.kind === 'timeline_event'
+      ? formatDateLabel(signal.payload.date)
+      : formatDateLabel(effectiveTimestamp(signal));
 
   if (signal.kind === 'timeline_event') {
-    return `- [${projectName}] ${signal.payload.title}`;
+    return `- [${projectName}] ${dateLabel} · ${cleanTitle(signal.payload.title)}`;
   }
   if (signal.kind === 'open_thread') {
-    return `- [${projectName}] ${signal.payload.title}`;
+    return `- [${projectName}] ${dateLabel} · ${cleanTitle(signal.payload.title)}`;
   }
   if (signal.kind === 'decision') {
-    return `- [${projectName}] ${signal.payload.topic}`;
+    const reason = cleanReason(signal.payload.rationale);
+    const decision = `- [${projectName}] ${dateLabel} · 决定：${cleanTitle(signal.payload.topic)}`;
+    if (reason.length === 0 || reason === cleanTitle(signal.payload.topic)) return decision;
+    return `${decision}；原因：${reason}`;
   }
 
-  return `- [${projectName}] ${signal.summary}`;
+  return `- [${projectName}] ${dateLabel} · ${cleanTitle(signal.summary)}`;
 }
 
 function sortByRelevance(signals: CanonicalSignal[]): CanonicalSignal[] {
@@ -182,10 +195,10 @@ export function compileWeeklyFocusView(
     finalSignalIds = [];
   }
 
-  const finalizedMarkdown = markdown.endsWith('\n') ? markdown : `${markdown}\n`;
-  const boundedMarkdown = finalizedMarkdown.length <= budget.maxChars
-    ? finalizedMarkdown
-    : finalizedMarkdown.slice(0, budget.maxChars);
+  const rebuiltSectionMd = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
+  const rebuiltBody = rebuiltSectionMd.length > 0 ? `\n${rebuiltSectionMd}\n` : '\n';
+  const finalized = finalizeMarkdownWithinBudget(header, rebuiltBody, budget.maxChars);
+  const boundedMarkdown = finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 
   return {
     viewId: budget.viewId,

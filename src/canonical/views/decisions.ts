@@ -1,4 +1,5 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
+import { areNearDuplicateTexts, cleanEvidence, cleanProjectName, cleanTitle, finalizeMarkdownWithinBudget, localizeTrust } from './view-text.js';
 
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
 
@@ -52,22 +53,36 @@ function sortDecisionSignals(signals: DecisionSignal[]): DecisionSignal[] {
   ));
 }
 
+function normalizeForDedup(input: string): string {
+  return cleanTitle(input)
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}。.!！?？…]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function renderDecisionBlock(signal: DecisionSignal): string {
   const date = effectiveDate(signal);
+  const topic = cleanTitle(signal.payload.topic);
+  const decision = cleanTitle(signal.payload.decision);
+  const rationale = cleanEvidence(signal.payload.rationale, 120);
+  const alternatives = signal.payload.alternatives.map((item) => cleanEvidence(item, 80)).filter((item) => item.length > 0);
   const lines: string[] = [];
-  lines.push(`### ${date}: ${signal.payload.topic}`);
-  lines.push(`- **决定**: ${signal.payload.decision}`);
+  lines.push(`### ${date}`);
+  if (!areNearDuplicateTexts(topic, decision)) {
+    lines.push(`- **主题**: ${topic}`);
+  }
+  lines.push(`- **决定**: ${decision}`);
 
-  if (signal.payload.rationale.length > 0) {
-    lines.push(`- **理由**: ${signal.payload.rationale}`);
+  if (rationale.length > 0 && rationale !== decision) {
+    lines.push(`- **理由**: ${rationale}`);
   }
 
-  if (signal.payload.alternatives.length > 0) {
-    lines.push(`- **替代方案**: ${signal.payload.alternatives.join(', ')}`);
+  if (alternatives.length > 0) {
+    lines.push(`- **替代方案**: ${alternatives.join('，')}`);
   }
 
-  const trustLabel = signal.trustScore >= 4 ? '高信任' : 'session 提取';
-  lines.push(`- **来源**: ${trustLabel}, ${signal.supportCount} 条证据`);
+  lines.push(`- **依据强度**: ${localizeTrust(signal.trustScore, signal.supportCount)}`);
 
   return lines.join('\n');
 }
@@ -97,7 +112,7 @@ export function compileDecisionsView(
 
   const grouped = new Map<string, DecisionSignal[]>();
   for (const signal of filtered) {
-    const project = signal.projectNames.length > 0 ? signal.projectNames[0] : 'cross_project';
+    const project = cleanProjectName(signal.projectNames[0], '未归类项目');
     const list = grouped.get(project) ?? [];
     list.push(signal);
     grouped.set(project, list);
@@ -115,10 +130,23 @@ export function compileDecisionsView(
     if (itemsWritten >= maxItemsTotal) break;
 
     const projectSignals = grouped.get(projectName) ?? [];
+    const seen = new Map<string, DecisionSignal>();
+    for (const signal of projectSignals) {
+      const key = `${effectiveDate(signal)}|${normalizeForDedup(signal.payload.decision)}`;
+      const existing = seen.get(key);
+      if (
+        existing == null
+        || signal.trustScore > existing.trustScore
+        || (signal.trustScore === existing.trustScore && signal.supportCount > existing.supportCount)
+      ) {
+        seen.set(key, signal);
+      }
+    }
+    const dedupedSignals = sortDecisionSignals([...seen.values()]);
     const sectionLines = [`## ${projectName}`];
     const sectionSignalIds: string[] = [];
 
-    for (const signal of projectSignals) {
+    for (const signal of dedupedSignals) {
       if (itemsWritten >= maxItemsTotal) break;
 
       const block = renderDecisionBlock(signal);
@@ -161,15 +189,15 @@ export function compileDecisionsView(
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = `${header}`.slice(0, budget.maxChars).trimEnd() + '\n';
+    markdown = finalizeMarkdownWithinBudget(header, '', budget.maxChars);
     finalSections = [];
     finalSignalIds = [];
   }
 
-  const finalizedMarkdown = markdown.endsWith('\n') ? markdown : `${markdown}\n`;
-  const boundedMarkdown = finalizedMarkdown.length <= budget.maxChars
-    ? finalizedMarkdown
-    : finalizedMarkdown.slice(0, budget.maxChars);
+  const sectionMarkdown = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
+  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${userNotes}\n` : `\n${userNotes}\n`;
+  const finalized = finalizeMarkdownWithinBudget(header, body, budget.maxChars);
+  const boundedMarkdown = finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 
   return {
     viewId: budget.viewId,

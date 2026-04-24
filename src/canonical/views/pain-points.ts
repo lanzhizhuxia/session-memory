@@ -1,4 +1,5 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
+import { cleanEvidence, cleanTitle, finalizeMarkdownWithinBudget, localizeRecurrence, localizeTrust } from './view-text.js';
 
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
 
@@ -45,22 +46,22 @@ function sortPainPointSignals(signals: PainPointSignal[]): PainPointSignal[] {
 
 function renderPainPointBlock(signal: PainPointSignal): string {
   const lines: string[] = [];
-  lines.push(`## ${signal.payload.problem}`);
+  lines.push(`## ${cleanTitle(signal.payload.problem)}`);
 
   if (signal.payload.symptoms != null && signal.payload.symptoms.length > 0) {
     lines.push(`- **典型症状**: ${signal.payload.symptoms.join(', ')}`);
   }
 
   if (signal.payload.diagnosis != null && signal.payload.diagnosis.length > 0) {
-    lines.push(`- **诊断**: ${signal.payload.diagnosis}`);
+    lines.push(`- **诊断**: ${cleanEvidence(signal.payload.diagnosis, 120)}`);
   }
 
   if (signal.payload.workaround != null && signal.payload.workaround.length > 0) {
-    lines.push(`- **解决方式**: ${signal.payload.workaround}`);
+    lines.push(`- **解决方式**: ${cleanEvidence(signal.payload.workaround, 120)}`);
   }
 
-  lines.push(`- **复发频率**: ${signal.payload.recurrence}`);
-  lines.push(`- **来源**: ${signal.supportCount} 条证据, 信任度 ${signal.trustScore}`);
+  lines.push(`- **复发频率**: ${localizeRecurrence(signal.payload.recurrence)}`);
+  lines.push(`- **依据强度**: ${localizeTrust(signal.trustScore, signal.supportCount)}`);
 
   return lines.join('\n');
 }
@@ -129,15 +130,15 @@ export function compilePainPointsView(
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = `${header}`.slice(0, budget.maxChars).trimEnd() + '\n';
+    markdown = finalizeMarkdownWithinBudget(header, '', budget.maxChars);
     finalSections = [];
     finalSignalIds = [];
   }
 
-  const finalizedMarkdown = markdown.endsWith('\n') ? markdown : `${markdown}\n`;
-  const boundedMarkdown = finalizedMarkdown.length <= budget.maxChars
-    ? finalizedMarkdown
-    : finalizedMarkdown.slice(0, budget.maxChars);
+  const sectionMarkdown = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
+  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${userNotes}\n` : `\n${userNotes}\n`;
+  const finalized = finalizeMarkdownWithinBudget(header, body, budget.maxChars);
+  const boundedMarkdown = finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 
   return {
     viewId: budget.viewId,

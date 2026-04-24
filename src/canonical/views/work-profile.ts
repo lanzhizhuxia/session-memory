@@ -1,4 +1,5 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
+import { cleanEvidence, dedupeByNormalizedText, finalizeMarkdownWithinBudget } from './view-text.js';
 
 const DIMENSION_ORDER = ['交互风格', '语言偏好', '技术审美', '工作节奏'];
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
@@ -171,18 +172,6 @@ function extractUserNotes(content: string | undefined): string | null {
   return content.slice(startIdx, endIdx + endTag.length);
 }
 
-function isDuplicateClaim(existing: string[], candidate: string): boolean {
-  const normalized = candidate.toLowerCase().replace(/\s+/g, ' ').trim();
-  if (normalized.length === 0) return true;
-  return existing.some((item) => {
-    const normalizedItem = item.toLowerCase().replace(/\s+/g, ' ').trim();
-    if (normalizedItem === normalized) return true;
-    const shorter = normalizedItem.length <= normalized.length ? normalizedItem : normalized;
-    const longer = normalizedItem.length > normalized.length ? normalizedItem : normalized;
-    return longer.includes(shorter) && shorter.length >= longer.length * 0.6;
-  });
-}
-
 function isRationaleRedundant(claim: string, rationale: string | undefined): boolean {
   if (rationale == null || rationale.length === 0) return true;
   const cleanRationale = sanitizeRationale(rationale);
@@ -195,7 +184,7 @@ function isRationaleRedundant(claim: string, rationale: string | undefined): boo
 function renderLine(signal: WorkStyleSignal): string {
   const { claim, rationale } = signal.payload;
   const showRationale = !isRationaleRedundant(claim, rationale);
-  const rationalePart = showRationale ? ` — *${sanitizeRationale(rationale!)}*` : '';
+  const rationalePart = showRationale ? ` — *${cleanEvidence(sanitizeRationale(rationale!), 70)}*` : '';
   return `- ${claim}${rationalePart} (${signal.supportCount} 条证据, 信任度 ${signal.trustScore})`;
 }
 
@@ -288,7 +277,8 @@ export function compileWorkProfileView(
         continue;
       }
 
-      if (isDuplicateClaim(claimsInSection, signal.payload.claim)) {
+      const deduped = dedupeByNormalizedText([...claimsInSection, signal.payload.claim], (claim) => claim);
+      if (deduped.length === claimsInSection.length) {
         droppedSignalIds.push(signal.id);
         droppedReasons.push('duplicate_claim');
         continue;
@@ -348,15 +338,15 @@ export function compileWorkProfileView(
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = `${header}`.slice(0, budget.maxChars).trimEnd() + '\n';
+    markdown = finalizeMarkdownWithinBudget(header, '', budget.maxChars);
     finalSections = [];
     finalSignalIds = [];
   }
 
-  const finalizedMarkdown = markdown.endsWith('\n') ? markdown : `${markdown}\n`;
-  const boundedMarkdown = finalizedMarkdown.length <= budget.maxChars
-    ? finalizedMarkdown
-    : finalizedMarkdown.slice(0, budget.maxChars);
+  const sectionMarkdown = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
+  const body = `${coreSection.markdown.trimEnd()}${sectionMarkdown.length > 0 ? `\n\n${sectionMarkdown}` : ''}\n\n${userNotes}\n`;
+  const finalized = finalizeMarkdownWithinBudget(header, `\n${body}`, budget.maxChars);
+  const boundedMarkdown = finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 
   const coreProfilePublishedSection: PublishedViewSection = {
     title: '核心画像',

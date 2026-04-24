@@ -117,7 +117,12 @@ async function callProjectSummaryAI(
       const jsonMatch = text.match(/\[[\s\S]*\]/);
       if (!jsonMatch) return null;
 
-      const parsed = JSON.parse(jsonMatch[0]) as unknown;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch {
+        return null;
+      }
       if (!Array.isArray(parsed)) return null;
 
       return parsed
@@ -126,7 +131,10 @@ async function callProjectSummaryAI(
           && item !== null
           && typeof (item as { project?: unknown }).project === 'string'
           && typeof (item as { summary?: unknown }).summary === 'string'
-        ));
+          && (item as { project: string }).project.trim().length > 0
+          && (item as { summary: string }).summary.trim().length > 0
+        ))
+        .map(item => ({ project: item.project.trim(), summary: item.summary.trim() }));
     } catch (error) {
       if (attempt < MAX_AI_RETRIES) {
         const delayMs = AI_RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500;

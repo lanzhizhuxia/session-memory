@@ -680,6 +680,34 @@ interface AIProfileResult {
   focus_areas?: string[];
 }
 
+function normalizeProfileResult(raw: unknown): AIProfileResult | null {
+  if (raw == null || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+
+  const role = typeof obj.role === 'string' ? obj.role.trim() : undefined;
+
+  let responsibilities: string[] | undefined;
+  if (Array.isArray(obj.responsibilities)) {
+    responsibilities = obj.responsibilities
+      .filter((item): item is string => typeof item === 'string')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (responsibilities.length === 0) responsibilities = undefined;
+  }
+
+  let focus_areas: string[] | undefined;
+  if (Array.isArray(obj.focus_areas)) {
+    focus_areas = obj.focus_areas
+      .filter((item): item is string => typeof item === 'string')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (focus_areas.length === 0) focus_areas = undefined;
+  }
+
+  if (!role && !responsibilities && !focus_areas) return null;
+  return { role: role || undefined, responsibilities, focus_areas };
+}
+
 const MAX_AI_RETRIES = 2;
 const AI_RETRY_BASE_MS = 1000;
 
@@ -727,7 +755,7 @@ async function callProfileAI(
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) return null;
 
-      return JSON.parse(jsonMatch[0]) as AIProfileResult;
+      return normalizeProfileResult(JSON.parse(jsonMatch[0]));
     } catch (err) {
       if (attempt < MAX_AI_RETRIES) {
         const delayMs = AI_RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500;

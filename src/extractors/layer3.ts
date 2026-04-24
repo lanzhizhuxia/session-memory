@@ -65,6 +65,131 @@ export interface Layer3Result {
   workProfileContent: string;
 }
 
+// ============================================================
+// AI response normalizers — coerce untrusted JSON to safe types
+// NOTE: profile-fact.ts and project-summary.ts have local copies.
+// When a 4th AI call site appears, extract to shared ai-normalize.ts.
+// ============================================================
+
+function asString(v: unknown, fallback = ''): string {
+  if (typeof v === 'string') return v.trim();
+  if (v == null) return fallback;
+  return String(v).trim();
+}
+
+function asStringArray(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map(item => asString(item)).filter(Boolean);
+  if (typeof v === 'string' && v.trim()) return [v.trim()];
+  return [];
+}
+
+function asBoolean(v: unknown, fallback = false): boolean {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return v !== 0;
+  if (typeof v === 'string') {
+    const lower = v.toLowerCase();
+    if (lower === 'true' || lower === 'yes' || lower === '1') return true;
+    if (lower === 'false' || lower === 'no' || lower === '0') return false;
+  }
+  return fallback;
+}
+
+interface DecisionContext {
+  dateStr: string;
+  sessionId: string;
+  sessionTitle: string;
+  sourceLabel: string;
+  projectName: string;
+}
+
+/**
+ * Normalize a raw AI-parsed decision into a safe Decision object.
+ * Returns null if the record is unusable (missing required `what` field).
+ */
+function normalizeDecision(raw: Record<string, unknown>, ctx: DecisionContext): Decision | null {
+  const what = asString(raw.what);
+  if (!what) return null;
+  return {
+    what,
+    why: asString(raw.why),
+    alternatives: asStringArray(raw.alternatives),
+    trigger: asString(raw.trigger),
+    date: asString(raw.date) || ctx.dateStr,
+    sessionId: asString(raw.sessionId) || ctx.sessionId,
+    sessionTitle: asString(raw.sessionTitle) || ctx.sessionTitle,
+    sourceLabel: asString(raw.sourceLabel) || ctx.sourceLabel,
+    projectName: asString(raw.projectName) || ctx.projectName,
+  };
+}
+
+interface PainPointContext {
+  sessionId: string;
+  sessionTitle: string;
+  sourceLabel: string;
+  projectName: string;
+}
+
+/**
+ * Normalize a raw AI-parsed pain point into a safe PainPoint object.
+ * Returns null if the record is unusable (missing required `problem` field).
+ */
+function normalizePainPoint(raw: Record<string, unknown>, ctx: PainPointContext): PainPoint | null {
+  const problem = asString(raw.problem);
+  if (!problem) return null;
+  return {
+    problem,
+    diagnosis: asString(raw.diagnosis),
+    solution: asString(raw.solution),
+    likely_recurring: asBoolean(raw.likely_recurring),
+    sessionId: asString(raw.sessionId) || ctx.sessionId,
+    sessionTitle: asString(raw.sessionTitle) || ctx.sessionTitle,
+    sourceLabel: asString(raw.sourceLabel) || ctx.sourceLabel,
+    projectName: asString(raw.projectName) || ctx.projectName,
+  };
+}
+
+/**
+ * Normalize a raw AI-parsed preference into a safe Preference object.
+ * Returns null if the record is unusable (missing required `observation` field).
+ */
+function normalizePreference(raw: Record<string, unknown>): Preference | null {
+  const observation = asString(raw.observation);
+  if (!observation) return null;
+  return {
+    category: asString(raw.category) || '其他',
+    observation,
+    evidence: asString(raw.evidence),
+  };
+}
+
+/** Normalize an array of raw AI-parsed items using a normalizer function. */
+function normalizeList<T, C>(
+  rawList: unknown,
+  normalizer: (raw: Record<string, unknown>, ctx: C) => T | null,
+  ctx: C,
+): T[] {
+  if (!Array.isArray(rawList)) return [];
+  const result: T[] = [];
+  for (const raw of rawList) {
+    if (raw == null || typeof raw !== 'object') continue;
+    const item = normalizer(raw as Record<string, unknown>, ctx);
+    if (item) result.push(item);
+  }
+  return result;
+}
+
+/** Normalize preferences (no context needed). */
+function normalizePreferenceList(rawList: unknown): Preference[] {
+  if (!Array.isArray(rawList)) return [];
+  const result: Preference[] = [];
+  for (const raw of rawList) {
+    if (raw == null || typeof raw !== 'object') continue;
+    const item = normalizePreference(raw as Record<string, unknown>);
+    if (item) result.push(item);
+  }
+  return result;
+}
+
 class SessionProcessingError extends Error {
   readonly sessionId: string;
   readonly causeValue: unknown;
@@ -395,9 +520,9 @@ function computePainPointHash(painPoint: Pick<PainPoint, 'problem' | 'diagnosis'
 
 function computePreferenceHash(preference: Pick<Preference, 'category' | 'observation' | 'evidence'>): string {
   return computeContentHash(JSON.stringify({
-    category: preference.category.trim(),
-    observation: preference.observation.trim(),
-    evidence: preference.evidence.trim(),
+    category: (preference.category ?? '').trim(),
+    observation: (preference.observation ?? '').trim(),
+    evidence: (preference.evidence ?? '').trim(),
   }));
 }
 
@@ -473,27 +598,16 @@ export async function runLayer3(
             callAI(PREFERENCE_PROMPT, conversation, config, sessionModel),
           ]);
 
-          const decisionData = parseJSON<{ decisions: Array<{ what: string; why: string; alternatives: string[]; trigger: string; date: string }> }>(decisionRes);
-          const decisions: Decision[] = (decisionData?.decisions ?? []).map(d => ({
-            ...d,
-            date: d.date || dateStr,
-            sessionId: session.id,
-            sessionTitle: session.title ?? '(untitled)',
-            sourceLabel,
-            projectName,
-          }));
+          const decisionData = parseJSON<{ decisions: unknown[] }>(decisionRes);
+          const sessionCtx: DecisionContext = { dateStr, sessionId: session.id, sessionTitle: session.title ?? '(untitled)', sourceLabel, projectName };
+          const decisions = normalizeList(decisionData?.decisions, normalizeDecision, sessionCtx);
 
-          const painData = parseJSON<{ pain_points: Array<{ problem: string; diagnosis: string; solution: string; likely_recurring: boolean }> }>(painRes);
-          const painPoints: PainPoint[] = (painData?.pain_points ?? []).map(p => ({
-            ...p,
-            sessionId: session.id,
-            sessionTitle: session.title ?? '(untitled)',
-            sourceLabel,
-            projectName,
-          }));
+          const painData = parseJSON<{ pain_points: unknown[] }>(painRes);
+          const ppCtx: PainPointContext = { sessionId: session.id, sessionTitle: session.title ?? '(untitled)', sourceLabel, projectName };
+          const painPoints = normalizeList(painData?.pain_points, normalizePainPoint, ppCtx);
 
-          const prefData = parseJSON<{ preferences: Array<{ category: string; observation: string; evidence: string }> }>(prefRes);
-          const preferences: Preference[] = prefData?.preferences ?? [];
+          const prefData = parseJSON<{ preferences: unknown[] }>(prefRes);
+          const preferences = normalizePreferenceList(prefData?.preferences);
 
           return { sessionId: session.id, decisions, painPoints, preferences, skipped: false };
         } catch (error) {
@@ -607,6 +721,7 @@ const CONSOLIDATE_DECISIONS_PROMPT = `你是一个决策日志编辑器。你的
 **合并**：同一 session 中关于同一主题的多个微决策合并为一个
 
 输入是 JSON 数组，输出精炼后的 JSON 数组（保持相同结构）。只返回 JSON，不要解释。
+**严格要求**：每个对象必须包含所有字段（what, why, alternatives, trigger, date, sessionId, sessionTitle, sourceLabel, projectName）。alternatives 必须是字符串数组（无替代方案时用 []），绝对不要省略任何 key。
 输出格式：{ "decisions": [...] }`;
 
 const CONSOLIDATE_PAIN_POINTS_PROMPT = `你是一个痛点分析编辑器。你的任务是聚合和筛选原始提取的痛点。
@@ -624,6 +739,7 @@ const CONSOLIDATE_PAIN_POINTS_PROMPT = `你是一个痛点分析编辑器。你�
 **保留**：真正的工程技术问题（性能瓶颈、兼容性问题、配置难题、反复出现的 bug 等）
 
 输入是 JSON 数组，输出精炼后的 JSON 数组。只返回 JSON。
+**严格要求**：每个对象必须包含所有字段（problem, diagnosis, solution, likely_recurring, sessionId, sessionTitle, sourceLabel, projectName）。likely_recurring 必须是 boolean。绝对不要省略任何 key。
 输出格式：{ "pain_points": [...] }`;
 
 const CONSOLIDATE_PREFERENCES_PROMPT = `你是一个用户画像编辑器。你需要把数百条重复、散乱的观察压缩成一份精炼的用户画像。
@@ -648,6 +764,7 @@ const CONSOLIDATE_PREFERENCES_PROMPT = `你是一个用户画像编辑器。你�
 5. 每条观察必须有具体 evidence，不能太抽象
 
 输入是 JSON 数组，输出精炼后的 JSON 数组。只返回 JSON。
+**严格要求**：每个对象必须包含全部 3 个字段（category, observation, evidence），都是非空字符串。绝对不要省略任何 key。
 输出格式：{ "preferences": [{ "category": "分类名", "observation": "观察", "evidence": "证据" }] }`;
 
 async function consolidateDecisions(decisions: Decision[], config: Layer3Config): Promise<Decision[]> {
@@ -679,11 +796,12 @@ async function consolidateDecisions(decisions: Decision[], config: Layer3Config)
 
     const cModel = config.consolidation_model;
     const response = await callAI(CONSOLIDATE_DECISIONS_PROMPT, text, config, cModel, 8192);
-    const parsed = parseJSON<{ decisions: Decision[] }>(response);
-    if (parsed?.decisions) {
-      // Restore projectName for all entries
-      for (const d of parsed.decisions) d.projectName = projectName;
-      result.push(...parsed.decisions);
+    const parsed = parseJSON<{ decisions: unknown[] }>(response);
+    if (Array.isArray(parsed?.decisions)) {
+      const first = decs[0];
+      const ctx: DecisionContext = { dateStr: first.date, sessionId: first.sessionId, sessionTitle: first.sessionTitle, sourceLabel: first.sourceLabel, projectName };
+      const normalized = normalizeList(parsed.decisions, normalizeDecision, ctx);
+      result.push(...normalized);
     } else {
       result.push(...decs); // fallback: keep raw
     }
@@ -718,10 +836,12 @@ async function consolidatePainPoints(painPoints: PainPoint[], config: Layer3Conf
 
     const cModel = config.consolidation_model;
     const response = await callAI(CONSOLIDATE_PAIN_POINTS_PROMPT, JSON.stringify(input, null, 0), config, cModel, 8192);
-    const parsed = parseJSON<{ pain_points: PainPoint[] }>(response);
-    if (parsed?.pain_points) {
-      for (const p of parsed.pain_points) p.projectName = projectName;
-      result.push(...parsed.pain_points);
+    const parsed = parseJSON<{ pain_points: unknown[] }>(response);
+    if (Array.isArray(parsed?.pain_points)) {
+      const first = points[0];
+      const ctx: PainPointContext = { sessionId: first.sessionId, sessionTitle: first.sessionTitle, sourceLabel: first.sourceLabel, projectName };
+      const normalized = normalizeList(parsed.pain_points, normalizePainPoint, ctx);
+      result.push(...normalized);
     } else {
       result.push(...points);
     }
@@ -754,9 +874,10 @@ async function consolidatePreferences(preferences: Preference[], config: Layer3C
     }));
 
     const response = await callAI(CONSOLIDATE_PREFERENCES_PROMPT, JSON.stringify(input, null, 0), config, cModel, 8192);
-    const parsed = parseJSON<{ preferences: Preference[] }>(response);
-    if (parsed?.preferences && parsed.preferences.length > 0) {
-      consolidatedBatches.push(...parsed.preferences);
+    const parsed = parseJSON<{ preferences: unknown[] }>(response);
+    const normalized = normalizePreferenceList(parsed?.preferences);
+    if (normalized.length > 0) {
+      consolidatedBatches.push(...normalized);
     } else {
       console.warn(`  Warning: preferences consolidation failed for batch of ${batch.length}, keeping raw`);
       consolidatedBatches.push(...batch);
@@ -782,9 +903,10 @@ async function consolidatePreferences(preferences: Preference[], config: Layer3C
         continue;
       }
       const resp = await callAI(CONSOLIDATE_PREFERENCES_PROMPT, JSON.stringify(fb.map(p => ({ category: p.category, observation: p.observation, evidence: p.evidence })), null, 0), config, cModel, 8192);
-      const parsed2 = parseJSON<{ preferences: Preference[] }>(resp);
-      if (parsed2?.preferences && parsed2.preferences.length > 0) {
-        finalResult.push(...parsed2.preferences);
+      const parsed2 = parseJSON<{ preferences: unknown[] }>(resp);
+      const normalized2 = normalizePreferenceList(parsed2?.preferences);
+      if (normalized2.length > 0) {
+        finalResult.push(...normalized2);
       } else {
         finalResult.push(...fb);
       }
@@ -868,12 +990,12 @@ function renderDecisions(decisions: Decision[], sourceSummary: string, _existing
     decs.sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''));
 
     for (const d of decs) {
-      lines.push(`### ${d.date}: ${d.what}`);
+      lines.push(`### ${d.date ?? 'unknown'}: ${d.what ?? ''}`);
       if (d.trigger) lines.push(`- **背景**: ${d.trigger}`);
-      if (d.alternatives.length > 0) lines.push(`- **考虑过的方案**: ${d.alternatives.join(', ')}`);
-      lines.push(`- **决定**: ${d.what}`);
-      lines.push(`- **理由**: ${d.why}`);
-      lines.push(`- **来源**: session \`${d.sessionId}\` [${d.sourceLabel}] — "${d.sessionTitle}" (${d.date})`);
+      if (d.alternatives && d.alternatives.length > 0) lines.push(`- **考虑过的方案**: ${d.alternatives.join(', ')}`);
+      lines.push(`- **决定**: ${d.what ?? ''}`);
+      lines.push(`- **理由**: ${d.why ?? ''}`);
+      lines.push(`- **来源**: session \`${d.sessionId ?? ''}\` [${d.sourceLabel ?? ''}] — "${d.sessionTitle ?? ''}" (${d.date ?? ''})`);
       lines.push('');
     }
   }
@@ -909,7 +1031,7 @@ function renderPainPoints(painPoints: PainPoint[], sourceSummary: string, _exist
   // Group similar problems (by exact problem text for now)
   const grouped = new Map<string, PainPoint[]>();
   for (const pp of painPoints) {
-    const key = pp.problem.slice(0, 50);
+    const key = (pp.problem ?? '').slice(0, 50) || '(unknown)';
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key)!.push(pp);
   }
@@ -918,18 +1040,18 @@ function renderPainPoints(painPoints: PainPoint[], sourceSummary: string, _exist
     const first = points[0];
     const projectCounts = new Map<string, number>();
     for (const p of points) {
-      projectCounts.set(p.projectName, (projectCounts.get(p.projectName) ?? 0) + 1);
+      projectCounts.set(p.projectName ?? '', (projectCounts.get(p.projectName ?? '') ?? 0) + 1);
     }
     const projectSummary = Array.from(projectCounts.entries())
       .map(([name, count]) => `${name} ×${count}`)
       .join(', ');
 
-    lines.push(`## ${first.problem}`);
+    lines.push(`## ${first.problem ?? ''}`);
     lines.push(`- **出现频率**: ${points.length} 次（${projectSummary}）`);
-    lines.push(`- **典型症状**: ${first.diagnosis}`);
-    lines.push(`- **解决模式**: ${first.solution}`);
+    lines.push(`- **典型症状**: ${first.diagnosis ?? ''}`);
+    lines.push(`- **解决模式**: ${first.solution ?? ''}`);
     lines.push(`- **可能反复**: ${first.likely_recurring ? 'yes' : 'no'}`);
-    const sourceRefs = points.map(p => `session \`${p.sessionId}\` [${p.sourceLabel}] — "${p.sessionTitle}"`).join(', ');
+    const sourceRefs = points.map(p => `session \`${p.sessionId ?? ''}\` [${p.sourceLabel ?? ''}] — "${p.sessionTitle ?? ''}"`).join(', ');
     lines.push(`- **来源**: ${sourceRefs}`);
     lines.push('');
   }
@@ -969,7 +1091,7 @@ function renderWorkProfile(preferences: Preference[], sourceSummary: string, exi
     // Session-derived preferences
     const categories = new Map<string, Preference[]>();
     for (const p of preferences) {
-      const cat = normalizeCategory(p.category);
+      const cat = normalizeCategory(p.category ?? '');
       if (!categories.has(cat)) categories.set(cat, []);
       categories.get(cat)!.push(p);
     }
@@ -986,10 +1108,10 @@ function renderWorkProfile(preferences: Preference[], sourceSummary: string, exi
       // Deduplicate similar observations
       const seen = new Set<string>();
       for (const p of categories.get(cat)!) {
-        const key = p.observation.slice(0, 50);
+        const key = (p.observation ?? '').slice(0, 50);
         if (seen.has(key)) continue;
         seen.add(key);
-        lines.push(`- ${p.observation} — *${p.evidence}*`);
+        lines.push(`- ${p.observation ?? ''} — *${p.evidence ?? ''}*`);
       }
       lines.push('');
     }
@@ -1008,7 +1130,8 @@ function renderWorkProfile(preferences: Preference[], sourceSummary: string, exi
   return lines.join('\n');
 }
 
-function normalizeCategory(cat: string): string {
+function normalizeCategory(cat: unknown): string {
+  if (typeof cat !== 'string' || !cat.trim()) return '其他';
   const lower = cat.toLowerCase();
   if (/交互|interaction|style/i.test(lower)) return '交互风格';
   if (/语言|language/i.test(lower)) return '语言偏好';

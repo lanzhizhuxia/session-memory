@@ -12,9 +12,9 @@ import {
 // Constants & filtering
 // ============================================================
 
-const MAX_DECISION_CHARS = 200;
-const MAX_RATIONALE_CHARS = 150;
-const MAX_TOPIC_CHARS = 60;
+const MAX_DECISION_CHARS = 320;
+const MAX_RATIONALE_CHARS = 280;
+const MAX_TOPIC_CHARS = 80;
 
 /** Status words that are not real decisions — skip these entries. */
 const STATUS_WORD_PATTERN = /^(问题|已修复|TODO|Review|PRD已完成|Bug|修复|完成|待处理|待办)$/i;
@@ -34,8 +34,25 @@ const META_COMMENTARY_PATTERNS = [
 // ============================================================
 
 function clamp(value: string, maxChars: number): string {
-  const trimmed = value.trim();
+  const trimmed = value.replace(/\s+/g, ' ').trim();
   if (trimmed.length <= maxChars) return trimmed;
+  const punctuation = ['。', '！', '？', '.', '!', '?', '；', ';'];
+  let bestCut = -1;
+  for (const mark of punctuation) {
+    const idx = trimmed.lastIndexOf(mark, maxChars);
+    if (idx > bestCut) bestCut = idx + 1;
+  }
+  const softPunctuation = ['，', ',', '、', '：', ':'];
+  let softCut = -1;
+  for (const mark of softPunctuation) {
+    const idx = trimmed.lastIndexOf(mark, maxChars);
+    if (idx > softCut) softCut = idx + 1;
+  }
+  const spaceCut = trimmed.lastIndexOf(' ', maxChars);
+  const threshold = Math.floor(maxChars * 0.5);
+  if (bestCut > threshold) return trimmed.slice(0, bestCut).trim();
+  if (softCut > threshold) return trimmed.slice(0, softCut).trim();
+  if (spaceCut > threshold) return trimmed.slice(0, spaceCut).trim();
   return `${trimmed.slice(0, maxChars - 1).trim()}…`;
 }
 

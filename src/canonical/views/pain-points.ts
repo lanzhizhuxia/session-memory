@@ -53,11 +53,11 @@ function renderPainPointBlock(signal: PainPointSignal): string {
   }
 
   if (signal.payload.diagnosis != null && signal.payload.diagnosis.length > 0) {
-    lines.push(`- **诊断**: ${cleanEvidence(signal.payload.diagnosis, 120)}`);
+    lines.push(`- **诊断**: ${cleanEvidence(signal.payload.diagnosis, 250)}`);
   }
 
   if (signal.payload.workaround != null && signal.payload.workaround.length > 0) {
-    lines.push(`- **解决方式**: ${cleanEvidence(signal.payload.workaround, 120)}`);
+    lines.push(`- **解决方式**: ${cleanEvidence(signal.payload.workaround, 250)}`);
   }
 
   lines.push(`- **复发频率**: ${localizeRecurrence(signal.payload.recurrence)}`);

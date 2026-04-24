@@ -65,8 +65,8 @@ function renderDecisionBlock(signal: DecisionSignal): string {
   const date = effectiveDate(signal);
   const topic = cleanTitle(signal.payload.topic);
   const decision = cleanTitle(signal.payload.decision);
-  const rationale = cleanEvidence(signal.payload.rationale, 120);
-  const alternatives = signal.payload.alternatives.map((item) => cleanEvidence(item, 80)).filter((item) => item.length > 0);
+  const rationale = cleanEvidence(signal.payload.rationale, 250);
+  const alternatives = signal.payload.alternatives.map((item) => cleanEvidence(item, 120)).filter((item) => item.length > 0);
   const lines: string[] = [];
   lines.push(`### ${date}`);
   if (!areNearDuplicateTexts(topic, decision)) {

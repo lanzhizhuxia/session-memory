@@ -10,7 +10,25 @@ import {
 
 function clampTitle(title: string): string {
   const trimmed = title.trim();
-  return trimmed.length <= 80 ? trimmed : `${trimmed.slice(0, 79).trim()}…`;
+  if (trimmed.length <= 120) return trimmed;
+  const punctuation = ['。', '！', '？', '.', '!', '?', '；', ';'];
+  let bestCut = -1;
+  for (const mark of punctuation) {
+    const idx = trimmed.lastIndexOf(mark, 120);
+    if (idx > bestCut) bestCut = idx + 1;
+  }
+  const softPunctuation = ['，', ',', '、', '：', ':'];
+  let softCut = -1;
+  for (const mark of softPunctuation) {
+    const idx = trimmed.lastIndexOf(mark, 120);
+    if (idx > softCut) softCut = idx + 1;
+  }
+  const spaceCut = trimmed.lastIndexOf(' ', 120);
+  const threshold = Math.floor(120 * 0.5);
+  if (bestCut > threshold) return trimmed.slice(0, bestCut).trim();
+  if (softCut > threshold) return trimmed.slice(0, softCut).trim();
+  if (spaceCut > threshold) return trimmed.slice(0, spaceCut).trim();
+  return `${trimmed.slice(0, 119).trim()}…`;
 }
 
 function mapStatus(status: string): OpenThreadPayload['status'] | null {

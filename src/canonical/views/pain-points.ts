@@ -1,7 +1,18 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
 import { cleanEvidence, cleanTitle, finalizeMarkdownWithinBudget, localizeRecurrence, localizeTrust } from './view-text.js';
+import { polishSections, type PolishConfig } from './polish.js';
 
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
+const PAIN_POINTS_POLISH_PROMPT = `你是一个技术问题诊断编辑。输入是反复出现的技术痛点记录草稿，输出是润色后的中文版本。
+
+要求：
+- 确保问题描述、诊断、解决方式都是通顺完整的中文
+- 修正截断的句子，使每个字段都是完整表述
+- 不要编造缺失的诊断或解决方案
+- 保持 ## 问题 / - **诊断/解决方式/复发频率/依据强度** 的结构
+- 每个 section 的 sectionId 必须保持不变
+
+输出严格 JSON 格式：{ "sections": [{ "sectionId": "...", "markdown": "..." }] }`;
 
 type PainPointSignal = Extract<CanonicalSignal, { kind: 'pain_point' }>;
 
@@ -89,12 +100,13 @@ function fitsBudget(markdown: string, budget: ViewBudget): boolean {
   return markdown.length <= budget.maxChars;
 }
 
-export function compilePainPointsView(
+export async function compilePainPointsView(
   signals: CanonicalSignal[],
   budget: ViewBudget,
   sourceSummary: string,
   existingContent?: string,
-): PublishedView {
+  polishConfig?: PolishConfig,
+): Promise<PublishedView> {
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
   const header = fileHeader('反复痛点');
@@ -103,7 +115,7 @@ export function compilePainPointsView(
     signals.filter((signal) => signal.status === 'active').filter(isPainPointSignal),
   );
 
-  const sections: PublishedViewSection[] = [];
+  const draftSections: PublishedViewSection[] = [];
   const sourceSignalIds: string[] = [];
   const maxItemsTotal = Math.min(budget.maxItemsTotal ?? Number.POSITIVE_INFINITY, budget.maxSignals ?? Number.POSITIVE_INFINITY);
   const userNotes = extractUserNotes(existingContent) ?? DEFAULT_USER_NOTES;
@@ -116,16 +128,35 @@ export function compilePainPointsView(
     if (block.length === 0) continue;
 
     const candidateSections = [
-      ...sections,
-      { title: signal.payload.problem, signalIds: [signal.id], markdown: `${block}\n` },
-    ];
+        ...draftSections,
+        { title: signal.payload.problem, signalIds: [signal.id], markdown: `${block}\n` },
+      ];
     const candidateMarkdown = buildMarkdown(header, candidateSections, userNotes, metadata);
     if (!fitsBudget(candidateMarkdown, budget)) break;
 
-    sections.push({ title: signal.payload.problem, signalIds: [signal.id], markdown: `${block}\n` });
+    draftSections.push({ title: signal.payload.problem, signalIds: [signal.id], markdown: `${block}\n` });
     sourceSignalIds.push(signal.id);
     itemsWritten++;
   }
+
+  const polishedMarkdownById = await polishSections(
+    budget.viewId,
+    '反复痛点',
+    draftSections.map((section) => ({ sectionId: section.title, title: section.title, draftMarkdown: section.markdown })),
+    PAIN_POINTS_POLISH_PROMPT,
+    polishConfig ?? {
+      enabled: false,
+      model: 'gpt-5.4-mini',
+      max_chars_per_call: 24000,
+      cache_version: 'v1',
+      cache_dir: '.state',
+    },
+  );
+
+  const sections = draftSections.map((section) => ({
+    ...section,
+    markdown: polishedMarkdownById.get(section.title) ?? section.markdown,
+  }));
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set(sourceSignalIds));

@@ -9,6 +9,18 @@ import type { AdapterRegistry } from '../adapters/registry.js';
 import type { NoiseFilter } from '../utils/noise-filter.js';
 import type { MemoryTechPreference } from '../memory/types.js';
 import { cleanTitle } from '../canonical/views/view-text.js';
+import { polishSections, type PolishConfig } from '../canonical/views/polish.js';
+
+const WORK_PATTERNS_POLISH_PROMPT = `你是一个工作模式分析编辑。输入是工作模式统计草稿（含任务类型分布、时段分布、首条消息模式），输出是润色后的中文版本。
+
+要求：
+- 不要修改表格中的统计数据（频次、占比、session数）
+- 可以润色表格中的示例文本，翻译英文为中文
+- 可以为每个 section 添加一句导语概括
+- 保持 markdown 表格结构不变
+- 每个 section 的 sectionId 必须保持不变
+
+输出严格 JSON 格式：{ "sections": [{ "sectionId": "...", "markdown": "..." }] }`;
 
 const EXAMPLE_NOISE_PATTERNS = [
   /\[(?:INFO|DEBUG|WARN(?:ING)?|ERROR|TRACE)\]/i,
@@ -187,6 +199,7 @@ export async function runLayer2(
   existingWorkPatterns?: string,
   existingTechPrefs?: string,
   memoryTechPreferences?: MemoryTechPreference[],
+  polishConfig?: PolishConfig,
 ): Promise<Layer2Result> {
   // Collect all non-noise sessions
   const allSessions: Array<{ session: Session; projectName: string }> = [];
@@ -310,7 +323,7 @@ export async function runLayer2(
     .sort((a, b) => b.sessionCount - a.sessionCount);
 
   // Render
-  const workPatternsContent = renderWorkPatterns(taskTypes, hourDistribution, firstMsgPatterns, sourceSummary, existingWorkPatterns);
+  const workPatternsContent = await renderWorkPatterns(taskTypes, hourDistribution, firstMsgPatterns, sourceSummary, existingWorkPatterns, polishConfig);
   const techPreferencesContent = renderTechPreferences(techMentions, sourceSummary, existingTechPrefs, memoryTechPreferences);
 
   return {
@@ -355,13 +368,14 @@ function makeBar(count: number, maxCount: number): string {
   return '█'.repeat(filled) + '░'.repeat(maxBars - filled);
 }
 
-function renderWorkPatterns(
+async function renderWorkPatterns(
   taskTypes: TaskTypeStats[],
   hourDistribution: HourStats[],
   firstMsgPatterns: FirstMsgPatternStats[],
   sourceSummary: string,
   existingContent?: string,
-): string {
+  polishConfig?: PolishConfig,
+): Promise<string> {
 
   const userNotes = extractUserNotes(existingContent);
 
@@ -407,18 +421,58 @@ function renderWorkPatterns(
   }
   lines.push('');
 
-  // Metadata + User notes
-  lines.push(fileMetadata(sourceSummary));
-  if (userNotes) {
-    lines.push(userNotes);
-  } else {
-    lines.push('<!-- user notes -->');
-    lines.push('<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->');
-    lines.push('<!-- /user notes -->');
-  }
-  lines.push('');
+  const metadata = fileMetadata(sourceSummary);
+  const sectionDrafts = [
+    {
+      sectionId: '高频任务类型',
+      title: '高频任务类型',
+      draftMarkdown: lines.slice(lines.indexOf('## 高频任务类型'), lines.indexOf('## 时段分布')).join('\n').trimEnd() + '\n',
+    },
+    {
+      sectionId: '时段分布',
+      title: '时段分布',
+      draftMarkdown: lines.slice(lines.indexOf('## 时段分布'), lines.indexOf('## 首条消息模式')).join('\n').trimEnd() + '\n',
+    },
+    {
+      sectionId: '首条消息模式',
+      title: '首条消息模式',
+      draftMarkdown: lines.slice(lines.indexOf('## 首条消息模式')).join('\n').trimEnd() + '\n',
+    },
+  ];
+  const polishedSections = await polishSections(
+    'work_patterns',
+    '工作模式',
+    sectionDrafts,
+    WORK_PATTERNS_POLISH_PROMPT,
+    polishConfig ?? {
+      enabled: false,
+      model: 'gpt-5.4-mini',
+      max_chars_per_call: 24000,
+      cache_version: 'v1',
+      cache_dir: '.state',
+    },
+  );
 
-  return lines.join('\n');
+  const finalizedLines: string[] = [];
+  finalizedLines.push(fileHeader('工作模式'));
+  finalizedLines.push('');
+  finalizedLines.push((polishedSections.get('高频任务类型') ?? sectionDrafts[0].draftMarkdown).trimEnd());
+  finalizedLines.push('');
+  finalizedLines.push((polishedSections.get('时段分布') ?? sectionDrafts[1].draftMarkdown).trimEnd());
+  finalizedLines.push('');
+  finalizedLines.push((polishedSections.get('首条消息模式') ?? sectionDrafts[2].draftMarkdown).trimEnd());
+  finalizedLines.push('');
+  finalizedLines.push(metadata);
+  if (userNotes) {
+    finalizedLines.push(userNotes);
+  } else {
+    finalizedLines.push('<!-- user notes -->');
+    finalizedLines.push('<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->');
+    finalizedLines.push('<!-- /user notes -->');
+  }
+  finalizedLines.push('');
+
+  return finalizedLines.join('\n');
 }
 
 function escapeTableCell(value: string): string {

@@ -43,6 +43,7 @@ import { PAIN_POINTS_BUDGET, compilePainPointsView } from '../src/canonical/view
 import { TIMELINE_BUDGET, compileTimelineView } from '../src/canonical/views/timeline.js';
 import { OPEN_THREADS_BUDGET, compileOpenThreadsView } from '../src/canonical/views/open-threads.js';
 import { WEEKLY_FOCUS_BUDGET, compileWeeklyFocusView } from '../src/canonical/views/weekly-focus.js';
+import type { PolishConfig } from '../src/canonical/views/polish.js';
 import type { QuarantineRecord } from '../src/canonical/store.js';
 import type { SignalCandidate, SignalKind, ViewBudget, EvidenceRecord } from '../src/canonical/types.js';
 
@@ -69,7 +70,7 @@ interface Config {
     include_projects?: string[];
     noise_project_human_threshold?: number;
   };
-  layer3?: {
+    layer3?: {
     enabled?: boolean;
     min_score?: number;
     max_sessions?: number;
@@ -78,9 +79,13 @@ interface Config {
     model?: string;
     long_context_model?: string;
     long_context_threshold?: number;
-    batch_size?: number;
-    consolidation_model?: string;
-  };
+      batch_size?: number;
+      consolidation_model?: string;
+      view_polish_enabled?: boolean;
+      view_polish_model?: string;
+      view_polish_max_chars_per_call?: number;
+      view_polish_cache_version?: string;
+    };
   memory?: {
     enabled?: boolean;
     'claude-code'?: {
@@ -415,6 +420,16 @@ async function main(): Promise<void> {
   }
   console.log('');
 
+  const polishConfig: PolishConfig = {
+    enabled: config.layer3?.view_polish_enabled ?? false,
+    model: config.layer3?.view_polish_model ?? config.layer3?.model ?? 'gpt-5.4-mini',
+    api_key: config.layer3?.api_key,
+    api_base_url: config.layer3?.api_base_url,
+    max_chars_per_call: config.layer3?.view_polish_max_chars_per_call ?? 24000,
+    cache_version: config.layer3?.view_polish_cache_version ?? 'v1',
+    cache_dir: path.join(outputDir, '.state'),
+  };
+
   // Step 4: Noise detection
   const noiseFilter = new NoiseFilter(config.noise_filter);
   const mergedProjects = registry.getAllProjects();
@@ -516,8 +531,9 @@ async function main(): Promise<void> {
     const otStats = runCanonicalPipeline(otExtracted, 'open_thread', canonicalStore);
     console.log(`  Open threads: ${otStats.signals} canonical (${otStats.candidates} candidates, ${otStats.quarantined} quarantined)`);
 
-    const openThreadsView = compileOpenThreadsView(
+    const openThreadsView = await compileOpenThreadsView(
       canonicalStore.getSignals('open_thread'), OPEN_THREADS_BUDGET, sourceSummaryL1, existingOpenThreads,
+      polishConfig,
     );
     fs.writeFileSync(path.join(outputDir, '未完成线索.md'), openThreadsView.markdown);
     canonicalStore.upsertPublishedView(openThreadsView);
@@ -564,6 +580,7 @@ async function main(): Promise<void> {
     registry, noiseFilter, mergedProjects, sourceSummary,
     existingWorkPatterns, undefined,
     memorySignals.techPreferences.length > 0 ? memorySignals.techPreferences : undefined,
+    polishConfig,
   );
 
   fs.writeFileSync(path.join(outputDir, '工作模式.md'), layer2Result.workPatternsContent);
@@ -624,11 +641,12 @@ async function main(): Promise<void> {
     };
 
     const existingTechPreferences = readFileIfExists(path.join(outputDir, '技术偏好.md'));
-    const techPreferencesView = compileTechPreferencesView(
+    const techPreferencesView = await compileTechPreferencesView(
       canonicalStore.getSignals('tech_preference'),
       techPreferenceBudget,
       sourceSummary,
       existingTechPreferences,
+      polishConfig,
     );
 
     const publishedIds = new Set(techPreferencesView.sourceSignalIds);
@@ -719,25 +737,28 @@ async function main(): Promise<void> {
       console.log(`  Work styles: ${wsStats.signals} canonical (${wsStats.candidates} candidates, ${wsStats.quarantined} quarantined)`);
 
       const existingDecisions = readFileIfExists(path.join(outputDir, '决策日志.md'));
-      const decisionsView = compileDecisionsView(
+      const decisionsView = await compileDecisionsView(
         canonicalStore.getSignals('decision'), DECISIONS_BUDGET, sourceSummary, existingDecisions ?? undefined,
+        polishConfig,
       );
       fs.writeFileSync(path.join(outputDir, '决策日志.md'), decisionsView.markdown);
       canonicalStore.upsertPublishedView(decisionsView);
       console.log(`  Written: 决策日志.md (canonical, ${decisionsView.sourceSignalIds.length} signals)`);
 
       const existingPainPoints = readFileIfExists(path.join(outputDir, '反复痛点.md'));
-      const painPointsView = compilePainPointsView(
+      const painPointsView = await compilePainPointsView(
         canonicalStore.getSignals('pain_point'), PAIN_POINTS_BUDGET, sourceSummary, existingPainPoints ?? undefined,
+        polishConfig,
       );
       fs.writeFileSync(path.join(outputDir, '反复痛点.md'), painPointsView.markdown);
       canonicalStore.upsertPublishedView(painPointsView);
       console.log(`  Written: 反复痛点.md (canonical, ${painPointsView.sourceSignalIds.length} signals)`);
 
       const existingWorkProfile = readFileIfExists(path.join(outputDir, '工作画像.md'));
-      const workProfileView = compileWorkProfileView(
+      const workProfileView = await compileWorkProfileView(
         canonicalStore.getSignals('work_style'), canonicalStore.getSignals('profile_fact'),
         canonicalStore.getSignals(), WORK_PROFILE_BUDGET, sourceSummary, existingWorkProfile ?? undefined,
+        polishConfig,
       );
       fs.writeFileSync(path.join(outputDir, '工作画像.md'), workProfileView.markdown);
       canonicalStore.upsertPublishedView(workProfileView);
@@ -789,17 +810,19 @@ async function main(): Promise<void> {
       model: config.layer3?.model,
     });
 
-    const timelineView = compileTimelineView(
+    const timelineView = await compileTimelineView(
       canonicalStore.getSignals('timeline_event'),
       projectDescriptions,
       TIMELINE_BUDGET, sourceSummaryFinal, existingTimeline,
+      polishConfig,
     );
     fs.writeFileSync(path.join(outputDir, '项目时间线.md'), timelineView.markdown);
     canonicalStore.upsertPublishedView(timelineView);
     console.log(`  Written: 项目时间线.md (canonical, ${timelineView.sourceSignalIds.length} signals)`);
 
-    const weeklyFocusView = compileWeeklyFocusView(
+    const weeklyFocusView = await compileWeeklyFocusView(
       canonicalStore.getSignals(), WEEKLY_FOCUS_BUDGET, sourceSummaryFinal,
+      polishConfig,
     );
     fs.writeFileSync(path.join(outputDir, '本周重点.md'), weeklyFocusView.markdown);
     canonicalStore.upsertPublishedView(weeklyFocusView);

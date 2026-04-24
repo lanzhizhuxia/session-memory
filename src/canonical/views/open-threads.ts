@@ -7,10 +7,22 @@ import {
   formatRelativeStaleness,
   localizeStatus,
 } from './view-text.js';
+import { polishSections, type PolishConfig } from './polish.js';
 
 type OpenThreadSignal = Extract<CanonicalSignal, { kind: 'open_thread' }>;
 
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
+const OPEN_THREADS_POLISH_PROMPT = `你是一个任务看板编辑。输入是按项目和状态分组的待办事项草稿，输出是润色后的中文版本。
+
+要求：
+- 将英文任务标题翻译为自然的中文任务描述，格式为"动作 + 目标/上下文"
+- 保留日期和搁置标注
+- 保留技术术语原文（文件名, 函数名, API名等）
+- 保持 ## 项目 / ### 状态 / - 日期 · 任务 的结构
+- 每个 section 的 sectionId 必须保持不变
+- 不要编造未提供的事实
+
+输出严格 JSON 格式：{ "sections": [{ "sectionId": "...", "markdown": "..." }] }`;
 
 const STATUS_ORDER: Record<string, number> = {
   in_progress: 0,
@@ -70,12 +82,13 @@ function fitsBudget(markdown: string, budget: ViewBudget): boolean {
   return markdown.length <= budget.maxChars;
 }
 
-export function compileOpenThreadsView(
+export async function compileOpenThreadsView(
   signals: CanonicalSignal[],
   budget: ViewBudget,
   sourceSummary: string,
   existingContent?: string,
-): PublishedView {
+  polishConfig?: PolishConfig,
+): Promise<PublishedView> {
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
   const header = fileHeader('未完成线索');
@@ -99,7 +112,7 @@ export function compileOpenThreadsView(
   });
 
   const statusOrder: Array<OpenThreadSignal['payload']['status']> = ['in_progress', 'blocked', 'open'];
-  const sections: PublishedViewSection[] = [];
+  const draftSections: PublishedViewSection[] = [];
   const sourceSignalIds: string[] = [];
   const maxItemsTotal = budget.maxItemsTotal ?? 60;
   const userNotes = extractUserNotes(existingContent) ?? DEFAULT_USER_NOTES;
@@ -135,7 +148,7 @@ export function compileOpenThreadsView(
         ];
         const candidateSignalIds = [...sectionSignalIds, ...statusSignalIds, signal.id];
         const candidateSections = [
-          ...sections,
+          ...draftSections,
           { title: projectName, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
         ];
         if (!fitsBudget(buildMarkdown(header, candidateSections, userNotes, budget.maxChars, metadata), budget)) break;
@@ -159,8 +172,27 @@ export function compileOpenThreadsView(
     }
 
     if (sectionSignalIds.length === 0) continue;
-    sections.push({ title: projectName, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
+    draftSections.push({ title: projectName, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
   }
+
+  const polishedMarkdownById = await polishSections(
+    budget.viewId,
+    '未完成线索',
+    draftSections.map((section) => ({ sectionId: section.title, title: section.title, draftMarkdown: section.markdown })),
+    OPEN_THREADS_POLISH_PROMPT,
+    polishConfig ?? {
+      enabled: false,
+      model: 'gpt-5.4-mini',
+      max_chars_per_call: 24000,
+      cache_version: 'v1',
+      cache_dir: '.state',
+    },
+  );
+
+  const sections = draftSections.map((section) => ({
+    ...section,
+    markdown: polishedMarkdownById.get(section.title) ?? section.markdown,
+  }));
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set(sourceSignalIds));

@@ -1,7 +1,19 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
 import { areNearDuplicateTexts, cleanEvidence, cleanProjectName, cleanTitle, finalizeMarkdownWithinBudget, localizeTrust } from './view-text.js';
+import { polishSections, type PolishConfig } from './polish.js';
 
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
+const DECISIONS_POLISH_PROMPT = `你是一个技术决策日志编辑。输入是按项目分组的技术决策记录草稿，输出是润色后的中文版本。
+
+要求：
+- 确保所有决定、理由、替代方案都是通顺的中文
+- 英文内容翻译为中文，技术术语保留原文
+- 修正不完整的句子，使每条理由都是完整表述
+- 不要编造缺失的事实，只润色已有内容的表达
+- 保持 ## 项目 / ### 日期 / - **决定/理由/替代方案/依据强度** 的结构
+- 每个 section 的 sectionId 必须保持不变
+
+输出严格 JSON 格式：{ "sections": [{ "sectionId": "...", "markdown": "..." }] }`;
 
 type DecisionSignal = Extract<CanonicalSignal, { kind: 'decision' }>;
 
@@ -101,12 +113,13 @@ function fitsBudget(markdown: string, budget: ViewBudget): boolean {
   return markdown.length <= budget.maxChars;
 }
 
-export function compileDecisionsView(
+export async function compileDecisionsView(
   signals: CanonicalSignal[],
   budget: ViewBudget,
   sourceSummary: string,
   existingContent?: string,
-): PublishedView {
+  polishConfig?: PolishConfig,
+): Promise<PublishedView> {
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
   const header = fileHeader('决策日志');
@@ -125,7 +138,7 @@ export function compileDecisionsView(
 
   const sortedProjectNames = [...grouped.keys()].sort((left, right) => left.localeCompare(right));
 
-  const sections: PublishedViewSection[] = [];
+  const draftSections: PublishedViewSection[] = [];
   const sourceSignalIds: string[] = [];
   const maxItemsTotal = Math.min(budget.maxItemsTotal ?? Number.POSITIVE_INFINITY, budget.maxSignals ?? Number.POSITIVE_INFINITY);
   const userNotes = extractUserNotes(existingContent) ?? DEFAULT_USER_NOTES;
@@ -160,9 +173,9 @@ export function compileDecisionsView(
       const candidateSectionLines = [...sectionLines, block];
       const candidateSignalIds = [...sectionSignalIds, signal.id];
       const candidateSections = [
-        ...sections,
-        { title: projectName, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
-      ];
+          ...draftSections,
+          { title: projectName, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
+        ];
       const candidateMarkdown = buildMarkdown(header, candidateSections, userNotes, metadata);
       if (!fitsBudget(candidateMarkdown, budget)) break;
 
@@ -174,8 +187,27 @@ export function compileDecisionsView(
 
     if (sectionSignalIds.length === 0) continue;
 
-    sections.push({ title: projectName, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
+    draftSections.push({ title: projectName, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
   }
+
+  const polishedMarkdownById = await polishSections(
+    budget.viewId,
+    '决策日志',
+    draftSections.map((section) => ({ sectionId: section.title, title: section.title, draftMarkdown: section.markdown })),
+    DECISIONS_POLISH_PROMPT,
+    polishConfig ?? {
+      enabled: false,
+      model: 'gpt-5.4-mini',
+      max_chars_per_call: 24000,
+      cache_version: 'v1',
+      cache_dir: '.state',
+    },
+  );
+
+  const sections = draftSections.map((section) => ({
+    ...section,
+    markdown: polishedMarkdownById.get(section.title) ?? section.markdown,
+  }));
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set(sourceSignalIds));

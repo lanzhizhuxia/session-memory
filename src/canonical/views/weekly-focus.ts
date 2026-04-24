@@ -1,5 +1,6 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
 import { cleanProjectName, cleanTitle, cleanViewText, finalizeMarkdownWithinBudget, formatDateLabel } from './view-text.js';
+import { polishSections, type PolishConfig } from './polish.js';
 
 type TimelineSignal = Extract<CanonicalSignal, { kind: 'timeline_event' }>;
 type OpenThreadSignal = Extract<CanonicalSignal, { kind: 'open_thread' }>;
@@ -7,6 +8,20 @@ type DecisionSignal = Extract<CanonicalSignal, { kind: 'decision' }>;
 
 const MS_PER_DAY = 86_400_000;
 const COMPLETION_PATTERN = /完成|deploy|review.*通过|上线|发布|delivered|shipped|merged/i;
+const WEEKLY_FOCUS_POLISH_PROMPT = `你是一个周报编辑。输入是本周工作重点的草稿（分为进行中、已完成、关键决策三部分），输出是润色后的中文版本。
+
+要求：
+- 将所有英文内容翻译为自然的中文
+- "进行中"部分强调当前推进的主线工作
+- "已完成"部分强调交付成果
+- "关键决策"部分保持决定+原因的结构，语言精炼
+- 保留技术术语原文（PRD编号, 文件名, 模块名等）
+- 保持 ## section / - [项目] 日期 · 内容 的结构
+- 每个 section 的 sectionId 必须保持不变
+- 不要编造未提供的事实
+- 语气像给团队领导的周报摘要
+
+输出严格 JSON 格式：{ "sections": [{ "sectionId": "...", "markdown": "..." }] }`;
 
 export const WEEKLY_FOCUS_BUDGET: ViewBudget = {
   viewId: 'weekly_focus',
@@ -109,11 +124,12 @@ function fitsBudget(markdown: string, budget: ViewBudget): boolean {
   return markdown.length <= budget.maxChars;
 }
 
-export function compileWeeklyFocusView(
+export async function compileWeeklyFocusView(
   allSignals: CanonicalSignal[],
   budget: ViewBudget,
   sourceSummary: string,
-): PublishedView {
+  polishConfig?: PolishConfig,
+): Promise<PublishedView> {
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
   const nowMs = generatedAt;
@@ -152,7 +168,7 @@ export function compileWeeklyFocusView(
     { title: '关键决策', signals: decisions },
   ];
 
-  const sections: PublishedViewSection[] = [];
+  const draftSections: PublishedViewSection[] = [];
   const sourceSignalIds: string[] = [];
   let itemsWritten = 0;
 
@@ -175,8 +191,27 @@ export function compileWeeklyFocusView(
 
     if (sectionSignalIds.length === 0) continue;
 
-    sections.push({ title, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
+    draftSections.push({ title, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
   }
+
+  const polishedMarkdownById = await polishSections(
+    budget.viewId,
+    '本周重点',
+    draftSections.map((section) => ({ sectionId: section.title, title: section.title, draftMarkdown: section.markdown })),
+    WEEKLY_FOCUS_POLISH_PROMPT,
+    polishConfig ?? {
+      enabled: false,
+      model: 'gpt-5.4-mini',
+      max_chars_per_call: 24000,
+      cache_version: 'v1',
+      cache_dir: '.state',
+    },
+  );
+
+  const sections = draftSections.map((section) => ({
+    ...section,
+    markdown: polishedMarkdownById.get(section.title) ?? section.markdown,
+  }));
 
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
   const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n${metadata}` : `\n${metadata}`;

@@ -1,10 +1,22 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
 import { cleanEvidence, dedupeByNormalizedText, finalizeMarkdownWithinBudget } from './view-text.js';
+import { polishSections, type PolishConfig } from './polish.js';
 
 const DIMENSION_ORDER = ['交互风格', '语言偏好', '技术审美', '工作节奏'];
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const PLACEHOLDER = '(待提取)';
+const WORK_PROFILE_POLISH_PROMPT = `你是一个用户画像编辑。输入是用户工作画像草稿（含核心画像和交互风格等维度），输出是润色后的中文版本。
+
+要求：
+- 合并语义相近的交互风格条目（如多条都说"简单任务偏指令式"应合并为一条）
+- 精简证据引用，只保留最有代表性的短引文
+- 确保所有内容是通顺的中文
+- 保持 ## section / - claim — *evidence* 的结构
+- 每个 section 的 sectionId 必须保持不变
+- 不要编造新的画像特征
+
+输出严格 JSON 格式：{ "sections": [{ "sectionId": "...", "markdown": "..." }] }`;
 
 type WorkStyleSignal = Extract<CanonicalSignal, { kind: 'work_style' }>;
 type ProfileFactSignal = Extract<CanonicalSignal, { kind: 'profile_fact' }>;
@@ -212,14 +224,15 @@ function fitsBudget(markdown: string, budget: ViewBudget): boolean {
   return markdown.length <= budget.maxChars;
 }
 
-export function compileWorkProfileView(
+export async function compileWorkProfileView(
   workStyleSignals: CanonicalSignal[],
   profileFactSignals: CanonicalSignal[],
   allSignals: CanonicalSignal[],
   budget: ViewBudget,
   sourceSummary: string,
   existingContent?: string,
-): PublishedView {
+  polishConfig?: PolishConfig,
+): Promise<PublishedView> {
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
   const header = fileHeader('工作画像');
@@ -256,7 +269,7 @@ export function compileWorkProfileView(
     ? dimensionNames
     : dimensionNames.slice(0, budget.maxSections);
 
-  const sections: PublishedViewSection[] = [];
+  const draftSections: PublishedViewSection[] = [];
   const sourceSignalIds: string[] = [];
   const droppedSignalIds: string[] = [];
   const droppedReasons: string[] = [];
@@ -296,9 +309,9 @@ export function compileWorkProfileView(
       const candidateSectionLines = [...sectionLines, line];
       const candidateSignalIds = [...sectionSignalIds, signal.id];
       const candidateSections = [
-        ...sections,
-        { title: dimension, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
-      ];
+          ...draftSections,
+          { title: dimension, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
+        ];
       const candidateMarkdown = buildMarkdown(header, coreSection.markdown, candidateSections, userNotes, metadata);
       if (!fitsBudget(candidateMarkdown, budget)) {
         droppedSignalIds.push(signal.id);
@@ -315,8 +328,34 @@ export function compileWorkProfileView(
 
     if (sectionSignalIds.length === 0) continue;
 
-    sections.push({ title: dimension, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
+    draftSections.push({ title: dimension, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
   }
+
+  const polishInputs = [
+    { sectionId: '核心画像', title: '核心画像', draftMarkdown: coreSection.markdown },
+    ...draftSections.map((section) => ({ sectionId: section.title, title: section.title, draftMarkdown: section.markdown })),
+  ];
+  const polishedMarkdownById = await polishSections(
+    budget.viewId,
+    '工作画像',
+    polishInputs,
+    WORK_PROFILE_POLISH_PROMPT,
+    polishConfig ?? {
+      enabled: false,
+      model: 'gpt-5.4-mini',
+      max_chars_per_call: 24000,
+      cache_version: 'v1',
+      cache_dir: '.state',
+    },
+  );
+  const polishedCoreSection = {
+    ...coreSection,
+    markdown: polishedMarkdownById.get('核心画像') ?? coreSection.markdown,
+  };
+  const sections = draftSections.map((section) => ({
+    ...section,
+    markdown: polishedMarkdownById.get(section.title) ?? section.markdown,
+  }));
 
   if (budget.maxSections != null && dimensionNames.length > budget.maxSections) {
     for (const dimension of dimensionNames.slice(budget.maxSections)) {
@@ -329,17 +368,17 @@ export function compileWorkProfileView(
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set([...coreProfileSignalIds, ...sourceSignalIds]));
-  let markdown = buildMarkdown(header, coreSection.markdown, finalSections, userNotes, metadata);
+  let markdown = buildMarkdown(header, polishedCoreSection.markdown, finalSections, userNotes, metadata);
 
   while (finalSections.length > 0 && !fitsBudget(markdown, budget)) {
     const removed = finalSections.pop();
     const removedIds = new Set(removed?.signalIds ?? []);
     finalSignalIds = finalSignalIds.filter((id) => !removedIds.has(id));
-    markdown = buildMarkdown(header, coreSection.markdown, finalSections, userNotes, metadata);
+    markdown = buildMarkdown(header, polishedCoreSection.markdown, finalSections, userNotes, metadata);
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = buildMarkdown(header, coreSection.markdown, [], DEFAULT_USER_NOTES, metadata);
+    markdown = buildMarkdown(header, polishedCoreSection.markdown, [], DEFAULT_USER_NOTES, metadata);
     finalSignalIds = [];
   }
 
@@ -350,14 +389,14 @@ export function compileWorkProfileView(
   }
 
   const sectionMarkdown = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const body = `${coreSection.markdown.trimEnd()}${sectionMarkdown.length > 0 ? `\n\n${sectionMarkdown}` : ''}\n\n${metadata}${userNotes}\n`;
+  const body = `${polishedCoreSection.markdown.trimEnd()}${sectionMarkdown.length > 0 ? `\n\n${sectionMarkdown}` : ''}\n\n${metadata}${userNotes}\n`;
   const finalized = finalizeMarkdownWithinBudget(header, `\n${body}`, budget.maxChars);
   const boundedMarkdown = finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 
   const coreProfilePublishedSection: PublishedViewSection = {
     title: '核心画像',
     signalIds: coreProfileSignalIds,
-    markdown: coreSection.markdown,
+    markdown: polishedCoreSection.markdown,
   };
 
   return {

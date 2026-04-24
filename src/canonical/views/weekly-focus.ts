@@ -18,8 +18,12 @@ export const WEEKLY_FOCUS_BUDGET: ViewBudget = {
   overflowPolicy: 'drop_low_score',
 };
 
-function fileHeader(title: string, sourceSummary: string, now: Date): string {
-  return `<!-- generated: ${now.toISOString().replace('Z', '+00:00')} -->\n<!-- sources: ${sourceSummary} -->\n# ${title}\n`;
+function fileHeader(title: string): string {
+  return `# ${title}\n`;
+}
+
+function fileMetadata(sourceSummary: string, now: Date): string {
+  return `<!-- generated: ${now.toISOString()} | sources: ${sourceSummary} -->\n`;
 }
 
 function effectiveTimestamp(signal: CanonicalSignal): number {
@@ -113,7 +117,8 @@ export function compileWeeklyFocusView(
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
   const nowMs = generatedAt;
-  const header = fileHeader('本周重点', sourceSummary, now);
+  const header = fileHeader('本周重点');
+  const metadata = fileMetadata(sourceSummary, now);
   const maxPerSection = budget.maxItemsPerSection ?? 12;
   const maxTotal = budget.maxItemsTotal ?? 30;
 
@@ -174,7 +179,7 @@ export function compileWeeklyFocusView(
   }
 
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n` : '\n';
+  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n${metadata}` : `\n${metadata}`;
   let markdown = `${header}${body}`;
 
   let finalSections = [...sections];
@@ -185,7 +190,7 @@ export function compileWeeklyFocusView(
     const removedIds = new Set(removed?.signalIds ?? []);
     finalSignalIds = finalSignalIds.filter((id) => !removedIds.has(id));
     const rebuiltSectionMd = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
-    const rebuiltBody = rebuiltSectionMd.length > 0 ? `\n${rebuiltSectionMd}\n` : '\n';
+    const rebuiltBody = rebuiltSectionMd.length > 0 ? `\n${rebuiltSectionMd}\n${metadata}` : `\n${metadata}`;
     markdown = `${header}${rebuiltBody}`;
   }
 
@@ -196,7 +201,7 @@ export function compileWeeklyFocusView(
   }
 
   const rebuiltSectionMd = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const rebuiltBody = rebuiltSectionMd.length > 0 ? `\n${rebuiltSectionMd}\n` : '\n';
+  const rebuiltBody = rebuiltSectionMd.length > 0 ? `\n${rebuiltSectionMd}\n${metadata}` : `\n${metadata}`;
   const finalized = finalizeMarkdownWithinBudget(header, rebuiltBody, budget.maxChars);
   const boundedMarkdown = finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 

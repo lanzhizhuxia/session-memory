@@ -95,6 +95,7 @@ export function cleanTitle(input: string | null | undefined): string {
     .replace(LOGGER_PREFIX_RE, ' ')
     .replace(RAW_MACHINE_LABEL_RE, ' ');
   value = collapseWhitespace(value);
+  value = value.replace(/[…\.]{2,}$/, '').trim();
   return isMeaningless(value) ? '未命名事项' : value;
 }
 

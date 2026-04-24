@@ -15,8 +15,12 @@ export const PAIN_POINTS_BUDGET: ViewBudget = {
   overflowPolicy: 'drop_low_score',
 };
 
-function fileHeader(title: string, sourceSummary: string, now: Date): string {
-  return `<!-- generated: ${now.toISOString().replace('Z', '+00:00')} -->\n<!-- sources: ${sourceSummary} -->\n# ${title}\n`;
+function fileHeader(title: string): string {
+  return `# ${title}\n`;
+}
+
+function fileMetadata(sourceSummary: string, now: Date): string {
+  return `<!-- generated: ${now.toISOString()} | sources: ${sourceSummary} -->\n`;
 }
 
 function extractUserNotes(content: string | undefined): string | null {
@@ -45,6 +49,15 @@ function sortPainPointSignals(signals: PainPointSignal[]): PainPointSignal[] {
 }
 
 function renderPainPointBlock(signal: PainPointSignal): string {
+  const diagnosis = signal.payload.diagnosis != null && signal.payload.diagnosis.length > 0
+    ? cleanEvidence(signal.payload.diagnosis, 250)
+    : '';
+  const workaround = signal.payload.workaround != null && signal.payload.workaround.length > 0
+    ? cleanEvidence(signal.payload.workaround, 250)
+    : '';
+
+  if (diagnosis.length === 0 && workaround.length === 0) return '';
+
   const lines: string[] = [];
   lines.push(`## ${cleanTitle(signal.payload.problem)}`);
 
@@ -52,12 +65,12 @@ function renderPainPointBlock(signal: PainPointSignal): string {
     lines.push(`- **典型症状**: ${signal.payload.symptoms.join(', ')}`);
   }
 
-  if (signal.payload.diagnosis != null && signal.payload.diagnosis.length > 0) {
-    lines.push(`- **诊断**: ${cleanEvidence(signal.payload.diagnosis, 250)}`);
+  if (diagnosis.length > 0) {
+    lines.push(`- **诊断**: ${diagnosis}`);
   }
 
-  if (signal.payload.workaround != null && signal.payload.workaround.length > 0) {
-    lines.push(`- **解决方式**: ${cleanEvidence(signal.payload.workaround, 250)}`);
+  if (workaround.length > 0) {
+    lines.push(`- **解决方式**: ${workaround}`);
   }
 
   lines.push(`- **复发频率**: ${localizeRecurrence(signal.payload.recurrence)}`);
@@ -66,10 +79,10 @@ function renderPainPointBlock(signal: PainPointSignal): string {
   return lines.join('\n');
 }
 
-function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string): string {
+function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string, metadata: string): string {
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
   const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n` : '\n';
-  return `${header}${body}${userNotes}\n`;
+  return `${header}${body}${metadata}${userNotes}\n`;
 }
 
 function fitsBudget(markdown: string, budget: ViewBudget): boolean {
@@ -84,7 +97,8 @@ export function compilePainPointsView(
 ): PublishedView {
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
-  const header = fileHeader('反复痛点', sourceSummary, now);
+  const header = fileHeader('反复痛点');
+  const metadata = fileMetadata(sourceSummary, now);
   const filtered = sortPainPointSignals(
     signals.filter((signal) => signal.status === 'active').filter(isPainPointSignal),
   );
@@ -105,7 +119,7 @@ export function compilePainPointsView(
       ...sections,
       { title: signal.payload.problem, signalIds: [signal.id], markdown: `${block}\n` },
     ];
-    const candidateMarkdown = buildMarkdown(header, candidateSections, userNotes);
+    const candidateMarkdown = buildMarkdown(header, candidateSections, userNotes, metadata);
     if (!fitsBudget(candidateMarkdown, budget)) break;
 
     sections.push({ title: signal.payload.problem, signalIds: [signal.id], markdown: `${block}\n` });
@@ -115,17 +129,17 @@ export function compilePainPointsView(
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set(sourceSignalIds));
-  let markdown = buildMarkdown(header, finalSections, userNotes);
+  let markdown = buildMarkdown(header, finalSections, userNotes, metadata);
 
   while (finalSections.length > 0 && !fitsBudget(markdown, budget)) {
     const removed = finalSections.pop();
     const removedIds = new Set(removed?.signalIds ?? []);
     finalSignalIds = finalSignalIds.filter((id) => !removedIds.has(id));
-    markdown = buildMarkdown(header, finalSections, userNotes);
+    markdown = buildMarkdown(header, finalSections, userNotes, metadata);
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES);
+    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES, metadata);
     finalSignalIds = [];
   }
 
@@ -136,7 +150,7 @@ export function compilePainPointsView(
   }
 
   const sectionMarkdown = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${userNotes}\n` : `\n${userNotes}\n`;
+  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${metadata}${userNotes}\n` : `\n${metadata}${userNotes}\n`;
   const finalized = finalizeMarkdownWithinBudget(header, body, budget.maxChars);
   const boundedMarkdown = finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 

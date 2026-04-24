@@ -26,8 +26,12 @@ export const OPEN_THREADS_BUDGET: ViewBudget = {
   overflowPolicy: 'drop_low_score',
 };
 
-function fileHeader(title: string, sourceSummary: string, now: Date): string {
-  return `<!-- generated: ${now.toISOString().replace('Z', '+00:00')} -->\n<!-- sources: ${sourceSummary} -->\n# ${title}\n`;
+function fileHeader(title: string): string {
+  return `# ${title}\n`;
+}
+
+function fileMetadata(sourceSummary: string, now: Date): string {
+  return `<!-- generated: ${now.toISOString()} | sources: ${sourceSummary} -->\n`;
 }
 
 function extractUserNotes(content: string | undefined): string | null {
@@ -55,9 +59,9 @@ function sortOpenThreadSignals(signals: OpenThreadSignal[]): OpenThreadSignal[] 
   });
 }
 
-function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string, maxChars: number): string {
+function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string, maxChars: number, metadata: string): string {
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${userNotes}\n` : `\n${userNotes}\n`;
+  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${metadata}${userNotes}\n` : `\n${metadata}${userNotes}\n`;
   const finalized = finalizeMarkdownWithinBudget(header, body, maxChars);
   return finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 }
@@ -74,7 +78,8 @@ export function compileOpenThreadsView(
 ): PublishedView {
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
-  const header = fileHeader('未完成线索', sourceSummary, now);
+  const header = fileHeader('未完成线索');
+  const metadata = fileMetadata(sourceSummary, now);
   const filtered = sortOpenThreadSignals(
     signals.filter((signal) => signal.status === 'active').filter(isOpenThreadSignal),
   );
@@ -133,7 +138,7 @@ export function compileOpenThreadsView(
           ...sections,
           { title: projectName, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
         ];
-        if (!fitsBudget(buildMarkdown(header, candidateSections, userNotes, budget.maxChars), budget)) break;
+        if (!fitsBudget(buildMarkdown(header, candidateSections, userNotes, budget.maxChars, metadata), budget)) break;
 
         statusLines.push(line);
         statusSignalIds.push(signal.id);
@@ -159,19 +164,19 @@ export function compileOpenThreadsView(
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set(sourceSignalIds));
-  let markdown = buildMarkdown(header, finalSections, userNotes, budget.maxChars);
+  let markdown = buildMarkdown(header, finalSections, userNotes, budget.maxChars, metadata);
 
   while (finalSections.length > 0 && !fitsBudget(markdown, budget)) {
     const removed = finalSections.pop();
     const removedIds = new Set(removed?.signalIds ?? []);
     finalSignalIds = finalSignalIds.filter((id) => !removedIds.has(id));
-    markdown = buildMarkdown(header, finalSections, userNotes, budget.maxChars);
+    markdown = buildMarkdown(header, finalSections, userNotes, budget.maxChars, metadata);
   }
 
   if (!fitsBudget(markdown, budget)) {
     finalSections = [];
     finalSignalIds = [];
-    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES, budget.maxChars);
+    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES, budget.maxChars, metadata);
   }
 
   return {

@@ -327,6 +327,28 @@ export async function runLayer2(
 // Rendering — PRD §6.1.2
 // ============================================================
 
+function formatISO(date: Date = new Date()): string {
+  return date.toISOString().replace('Z', '+00:00');
+}
+
+function fileHeader(title: string): string {
+  return `# ${title}\n`;
+}
+
+function fileMetadata(sourceSummary: string, now: Date = new Date()): string {
+  return `<!-- generated: ${formatISO(now)} | sources: ${sourceSummary} -->`;
+}
+
+function extractUserNotes(content?: string): string | null {
+  if (!content) return null;
+  const startTag = '<!-- user notes -->';
+  const endTag = '<!-- /user notes -->';
+  const startIdx = content.indexOf(startTag);
+  const endIdx = content.indexOf(endTag);
+  if (startIdx === -1 || endIdx === -1) return null;
+  return content.slice(startIdx, endIdx + endTag.length);
+}
+
 function makeBar(count: number, maxCount: number): string {
   const maxBars = 10;
   const filled = maxCount > 0 ? Math.round((count / maxCount) * maxBars) : 0;
@@ -340,11 +362,11 @@ function renderWorkPatterns(
   sourceSummary: string,
   existingContent?: string,
 ): string {
-  const { fileHeader, extractUserNotes } = rendererHelpers();
+
   const userNotes = extractUserNotes(existingContent);
 
   const lines: string[] = [];
-  lines.push(fileHeader('工作模式', sourceSummary));
+  lines.push(fileHeader('工作模式'));
   lines.push('');
 
   // Task types table
@@ -385,7 +407,8 @@ function renderWorkPatterns(
   }
   lines.push('');
 
-  // User notes
+  // Metadata + User notes
+  lines.push(fileMetadata(sourceSummary));
   if (userNotes) {
     lines.push(userNotes);
   } else {
@@ -408,11 +431,11 @@ function renderTechPreferences(
   existingContent?: string,
   memoryPrefs?: MemoryTechPreference[],
 ): string {
-  const { fileHeader, extractUserNotes } = rendererHelpers();
+
   const userNotes = extractUserNotes(existingContent);
 
   const lines: string[] = [];
-  lines.push(fileHeader('技术偏好', sourceSummary));
+  lines.push(fileHeader('技术偏好'));
   lines.push('');
 
   // Merge memory-derived preferences as a separate section at the top
@@ -462,7 +485,8 @@ function renderTechPreferences(
     lines.push('');
   }
 
-  // User notes
+  // Metadata + User notes
+  lines.push(fileMetadata(sourceSummary));
   if (userNotes) {
     lines.push(userNotes);
   } else {
@@ -473,27 +497,4 @@ function renderTechPreferences(
   lines.push('');
 
   return lines.join('\n');
-}
-
-/** Shared renderer helpers to avoid circular dependency with renderer.ts */
-function rendererHelpers() {
-  function formatISO(date: Date = new Date()): string {
-    return date.toISOString().replace('Z', '+00:00');
-  }
-
-  function fileHeader(title: string, sourceSummary: string, now: Date = new Date()): string {
-    return `<!-- generated: ${formatISO(now)} -->\n<!-- sources: ${sourceSummary} -->\n# ${title}\n`;
-  }
-
-  function extractUserNotes(content?: string): string | null {
-    if (!content) return null;
-    const startTag = '<!-- user notes -->';
-    const endTag = '<!-- /user notes -->';
-    const startIdx = content.indexOf(startTag);
-    const endIdx = content.indexOf(endTag);
-    if (startIdx === -1 || endIdx === -1) return null;
-    return content.slice(startIdx, endIdx + endTag.length);
-  }
-
-  return { formatISO, fileHeader, extractUserNotes };
 }

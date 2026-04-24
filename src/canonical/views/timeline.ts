@@ -19,8 +19,12 @@ export const TIMELINE_BUDGET: ViewBudget = {
   overflowPolicy: 'drop_low_score',
 };
 
-function fileHeader(title: string, sourceSummary: string, now: Date): string {
-  return `<!-- generated: ${now.toISOString().replace('Z', '+00:00')} -->\n<!-- sources: ${sourceSummary} -->\n# ${title}\n`;
+function fileHeader(title: string): string {
+  return `# ${title}\n`;
+}
+
+function fileMetadata(sourceSummary: string, now: Date): string {
+  return `<!-- generated: ${now.toISOString()} | sources: ${sourceSummary} -->\n`;
 }
 
 function extractUserNotes(content: string | undefined): string | null {
@@ -56,12 +60,16 @@ function isLowValueTimelineEntry(title: string): boolean {
   return /^(?:Explore|Inspect|Research|Search|Find|Look|Read|Check|Investigate)\b/i.test(title)
     || /^(?:hello|hi|test|测试|Tell me about yourself)$/i.test(title)
     || /^\[TEAM_STATUS\]/.test(title)
-    || /^Oracle\b.*\breview\b/i.test(title);
+    || /^Oracle\b.*\breview\b/i.test(title)
+    || /^\[Pasted ~/.test(title)
+    || /你是.*助手。通过/.test(title)
+    || /^Evaluate the updated report/.test(title)
+    || (title.length > 80 && /[，。！？、；：""''【】（）…]{2,}/.test(title) && /(https?:\/\/|resume|面试|简历)/.test(title));
 }
 
-function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string): string {
+function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string, metadata: string): string {
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${userNotes}\n` : `\n${userNotes}\n`;
+  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${metadata}${userNotes}\n` : `\n${metadata}${userNotes}\n`;
   const finalized = finalizeMarkdownWithinBudget(header, body, TIMELINE_BUDGET.maxChars);
   return finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 }
@@ -79,7 +87,8 @@ export function compileTimelineView(
 ): PublishedView {
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
-  const header = fileHeader('项目时间线', sourceSummary, now);
+  const header = fileHeader('项目时间线');
+  const metadata = fileMetadata(sourceSummary, now);
   const activeTimelineSignals = sortTimelineSignals(
     signals
       .filter((signal) => signal.status === 'active')
@@ -198,7 +207,7 @@ export function compileTimelineView(
           ...sections,
           { title: projectName, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
         ];
-        if (!fitsBudget(buildMarkdown(header, candidateSections, userNotes), budget)) break;
+        if (!fitsBudget(buildMarkdown(header, candidateSections, userNotes, metadata), budget)) break;
 
         dateLines.push(line);
         dateSignalIds.push(signal.id);
@@ -220,24 +229,24 @@ export function compileTimelineView(
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set(sourceSignalIds));
-  let markdown = buildMarkdown(header, finalSections, userNotes);
+  let markdown = buildMarkdown(header, finalSections, userNotes, metadata);
 
   while (finalSections.length > 0 && !fitsBudget(markdown, budget)) {
     const removed = finalSections.pop();
     const removedIds = new Set(removed?.signalIds ?? []);
     finalSignalIds = finalSignalIds.filter((id) => !removedIds.has(id));
-    markdown = buildMarkdown(header, finalSections, userNotes);
+    markdown = buildMarkdown(header, finalSections, userNotes, metadata);
   }
 
   if (!fitsBudget(markdown, budget)) {
     finalSections = [];
     finalSignalIds = [];
-    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES);
+    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES, metadata);
   }
 
   const finalMarkdown = fitsBudget(markdown, budget)
     ? markdown
-    : finalizeMarkdownWithinBudget(header, `\n${userNotes}\n`, budget.maxChars);
+    : finalizeMarkdownWithinBudget(header, `\n${metadata}${userNotes}\n`, budget.maxChars);
 
   return {
     viewId: budget.viewId,

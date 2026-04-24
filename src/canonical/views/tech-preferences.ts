@@ -19,8 +19,12 @@ export const TECH_PREFS_BUDGET: ViewBudget = {
   overflowPolicy: 'drop_low_score',
 };
 
-function fileHeader(title: string, sourceSummary: string, now: Date): string {
-  return `<!-- generated: ${now.toISOString().replace('Z', '+00:00')} -->\n<!-- sources: ${sourceSummary} -->\n# ${title}\n`;
+function fileHeader(title: string): string {
+  return `# ${title}\n`;
+}
+
+function fileMetadata(sourceSummary: string, now: Date): string {
+  return `<!-- generated: ${now.toISOString()} | sources: ${sourceSummary} -->\n`;
 }
 
 function sanitizeRationale(value: string): string {
@@ -126,10 +130,10 @@ function renderLine(group: AggregatedTechPreference): string {
     : `- **${representative.payload.technology}** (${localizeStance(stance)}) — *${supportCount} 条证据${scopeSuffix}, 信任度 ${representative.trustScore}*`;
 }
 
-function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string): string {
+function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string, metadata: string): string {
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
   const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n` : '\n';
-  return `${header}${body}${userNotes}\n`;
+  return `${header}${body}${metadata}${userNotes}\n`;
 }
 
 function fitsBudget(markdown: string, budget: ViewBudget): boolean {
@@ -144,7 +148,8 @@ export function compileTechPreferencesView(
 ): PublishedView {
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
-  const header = fileHeader('技术偏好', sourceSummary, now);
+  const header = fileHeader('技术偏好');
+  const metadata = fileMetadata(sourceSummary, now);
   const filteredSignals = sortSignals(
     signals.filter((signal) => signal.status === 'active').filter(isTechPreferenceSignal),
   );
@@ -194,7 +199,7 @@ export function compileTechPreferencesView(
         ...sections,
         { title: category, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
       ];
-      const candidateMarkdown = buildMarkdown(header, candidateSections, userNotes);
+      const candidateMarkdown = buildMarkdown(header, candidateSections, userNotes, metadata);
       if (!fitsBudget(candidateMarkdown, budget)) break;
 
       sectionLines.push(line);
@@ -210,17 +215,17 @@ export function compileTechPreferencesView(
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set(sourceSignalIds));
-  let markdown = buildMarkdown(header, finalSections, userNotes);
+  let markdown = buildMarkdown(header, finalSections, userNotes, metadata);
 
   while (finalSections.length > 0 && !fitsBudget(markdown, budget)) {
     const removed = finalSections.pop();
     const removedIds = new Set(removed?.signalIds ?? []);
     finalSignalIds = finalSignalIds.filter((id) => !removedIds.has(id));
-    markdown = buildMarkdown(header, finalSections, userNotes);
+    markdown = buildMarkdown(header, finalSections, userNotes, metadata);
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES);
+    markdown = buildMarkdown(header, [], DEFAULT_USER_NOTES, metadata);
     finalSignalIds = [];
   }
 
@@ -231,7 +236,7 @@ export function compileTechPreferencesView(
   }
 
   const sectionMarkdown = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${userNotes}\n` : `\n${userNotes}\n`;
+  const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n${metadata}${userNotes}\n` : `\n${metadata}${userNotes}\n`;
   const finalized = finalizeMarkdownWithinBudget(header, body, budget.maxChars);
   const boundedMarkdown = finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 

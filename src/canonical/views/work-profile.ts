@@ -18,8 +18,12 @@ export const WORK_PROFILE_BUDGET: ViewBudget = {
   overflowPolicy: 'drop_low_score',
 };
 
-function fileHeader(title: string, sourceSummary: string, now: Date): string {
-  return `<!-- generated: ${now.toISOString().replace('Z', '+00:00')} -->\n<!-- sources: ${sourceSummary} -->\n# ${title}\n`;
+function fileHeader(title: string): string {
+  return `# ${title}\n`;
+}
+
+function fileMetadata(sourceSummary: string, now: Date): string {
+  return `<!-- generated: ${now.toISOString()} | sources: ${sourceSummary} -->\n`;
 }
 
 function sanitizeRationale(value: string): string {
@@ -193,6 +197,7 @@ function buildMarkdown(
   coreProfileMarkdown: string,
   sections: PublishedViewSection[],
   userNotes: string,
+  metadata: string,
 ): string {
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
   const corePart = coreProfileMarkdown.length > 0 ? `\n${coreProfileMarkdown.trimEnd()}\n` : '';
@@ -200,7 +205,7 @@ function buildMarkdown(
   const body = corePart.length > 0 || workStylePart.length > 0
     ? `${corePart}${workStylePart}\n`
     : '\n';
-  return `${header}${body}${userNotes}\n`;
+  return `${header}${body}${metadata}${userNotes}\n`;
 }
 
 function fitsBudget(markdown: string, budget: ViewBudget): boolean {
@@ -217,7 +222,8 @@ export function compileWorkProfileView(
 ): PublishedView {
   const generatedAt = Date.now();
   const now = new Date(generatedAt);
-  const header = fileHeader('工作画像', sourceSummary, now);
+  const header = fileHeader('工作画像');
+  const metadata = fileMetadata(sourceSummary, now);
 
   const coreFields = buildCoreProfileFields(profileFactSignals, allSignals, generatedAt);
   const coreSection = renderCoreProfileSection(coreFields);
@@ -293,7 +299,7 @@ export function compileWorkProfileView(
         ...sections,
         { title: dimension, signalIds: candidateSignalIds, markdown: `${candidateSectionLines.join('\n')}\n` },
       ];
-      const candidateMarkdown = buildMarkdown(header, coreSection.markdown, candidateSections, userNotes);
+      const candidateMarkdown = buildMarkdown(header, coreSection.markdown, candidateSections, userNotes, metadata);
       if (!fitsBudget(candidateMarkdown, budget)) {
         droppedSignalIds.push(signal.id);
         droppedReasons.push('over_char_budget');
@@ -323,17 +329,17 @@ export function compileWorkProfileView(
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set([...coreProfileSignalIds, ...sourceSignalIds]));
-  let markdown = buildMarkdown(header, coreSection.markdown, finalSections, userNotes);
+  let markdown = buildMarkdown(header, coreSection.markdown, finalSections, userNotes, metadata);
 
   while (finalSections.length > 0 && !fitsBudget(markdown, budget)) {
     const removed = finalSections.pop();
     const removedIds = new Set(removed?.signalIds ?? []);
     finalSignalIds = finalSignalIds.filter((id) => !removedIds.has(id));
-    markdown = buildMarkdown(header, coreSection.markdown, finalSections, userNotes);
+    markdown = buildMarkdown(header, coreSection.markdown, finalSections, userNotes, metadata);
   }
 
   if (!fitsBudget(markdown, budget)) {
-    markdown = buildMarkdown(header, coreSection.markdown, [], DEFAULT_USER_NOTES);
+    markdown = buildMarkdown(header, coreSection.markdown, [], DEFAULT_USER_NOTES, metadata);
     finalSignalIds = [];
   }
 
@@ -344,7 +350,7 @@ export function compileWorkProfileView(
   }
 
   const sectionMarkdown = finalSections.map((section) => section.markdown.trimEnd()).join('\n\n');
-  const body = `${coreSection.markdown.trimEnd()}${sectionMarkdown.length > 0 ? `\n\n${sectionMarkdown}` : ''}\n\n${userNotes}\n`;
+  const body = `${coreSection.markdown.trimEnd()}${sectionMarkdown.length > 0 ? `\n\n${sectionMarkdown}` : ''}\n\n${metadata}${userNotes}\n`;
   const finalized = finalizeMarkdownWithinBudget(header, `\n${body}`, budget.maxChars);
   const boundedMarkdown = finalized.endsWith('\n') ? finalized : `${finalized}\n`;
 

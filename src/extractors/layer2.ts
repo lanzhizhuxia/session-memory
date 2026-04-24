@@ -8,11 +8,15 @@ import type { Session, MergedProject } from '../adapters/types.js';
 import type { AdapterRegistry } from '../adapters/registry.js';
 import type { NoiseFilter } from '../utils/noise-filter.js';
 import type { MemoryTechPreference } from '../memory/types.js';
+import { cleanTitle } from '../canonical/views/view-text.js';
 
 const EXAMPLE_NOISE_PATTERNS = [
-  /^\s*\[(?:INFO|DEBUG|WARN(?:ING)?|ERROR|TRACE)/i,
-  /^\s*<local-command-caveat>/i,
+  /\[(?:INFO|DEBUG|WARN(?:ING)?|ERROR|TRACE)\]/i,
   /<\/?local-command-caveat>/i,
+  /computer_use_demo/i,
+  /\.tools\.logger/i,
+  /^\s*\[(?:TEAM_STATUS|Pasted)\b/i,
+  /^\s*(?:hello|hi|test|测试|pong)\s*$/i,
 ];
 
 function isHighQualityExample(input: string | null | undefined): boolean {
@@ -216,7 +220,7 @@ export async function runLayer2(
       if (tt.patterns.some(p => p.test(titleText))) {
         const entry = taskTypeCounts.get(tt.category) ?? { count: 0 };
         entry.count++;
-        if (!entry.example && titleText) {
+        if (!entry.example && titleText && isHighQualityExample(titleText)) {
           entry.example = { title: titleText, sourceLabel };
         }
         taskTypeCounts.set(tt.category, entry);
@@ -350,7 +354,7 @@ function renderWorkPatterns(
   lines.push('|---|---|---|---|');
   for (const tt of taskTypes) {
     const example = tt.exampleSession
-      ? `"${escapeTableCell(tt.exampleSession.title.slice(0, 40))}" [${tt.exampleSession.sourceLabel}]`
+      ? `"${escapeTableCell(cleanTitle(tt.exampleSession.title).slice(0, 40))}"`
       : '—';
     lines.push(`| ${escapeTableCell(tt.category)} | ${tt.count} | ${tt.percent}% | ${example} |`);
   }

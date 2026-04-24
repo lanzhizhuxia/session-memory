@@ -11,7 +11,8 @@ const LOGGER_PREFIX_RE = /^\s*\[(?:INFO|DEBUG|WARN(?:ING)?|ERROR|TRACE)\][^\n]*$
 const RAW_MACHINE_LABEL_RE = /^\s*\[(?:in_progress|open|blocked)\]\s*/i;
 const SOURCE_LABEL_RE = /^\s*\[(?:OC|CC)\]\s*/i;
 const RECORD_PREFIX_RE = /^\s*\[记录\]\s*/i;
-const SUBAGENT_RE = /\s*\(@[^)]*subagent\)\s*/gi;
+const SUBAGENT_RE = /\s*\(@[\s\S]*?subagent[\s\S]*?\)\s*/gi;
+const SUBAGENT_TRUNCATED_RE = /\s*\(@\S.*?…?\s*$/gi;
 const LOCAL_COMMAND_RE = /<\/?local-command-caveat>/gi;
 const GENERIC_TAG_RE = /<\/?[\w-]+>/g;
 const TOOL_LIKE_PREFIX_RE = /^\s*[a-z_][a-z0-9_]*:\s*/;
@@ -84,6 +85,7 @@ export function cleanProjectName(input: string | null | undefined, fallback?: st
 export function cleanTitle(input: string | null | undefined): string {
   let value = cleanViewText(input)
     .replace(SUBAGENT_RE, ' ')
+    .replace(SUBAGENT_TRUNCATED_RE, '')
     .replace(SOURCE_LABEL_RE, '')
     .replace(RECORD_PREFIX_RE, '')
     .replace(FILE_PATH_PREFIX_RE, '')
@@ -175,6 +177,8 @@ export function shouldHideAsNoise(input: string | null | undefined): boolean {
   const raw = String(input ?? '').trim();
   if (raw.length === 0) return true;
   if (LOGGER_PREFIX_RE.test(raw) || LOCAL_COMMAND_RE.test(raw)) return true;
+  if (/^\[[\w-]+\]\s*name:\s*\S+\s+type:\s*/i.test(raw)) return true;
+  if (/^\s*(?:hello|hi|test|测试|pong|ping)\s*$/i.test(raw)) return true;
   const cleaned = cleanTitle(raw);
   if (cleaned === '未命名事项') return true;
   if (cleaned.length < 5) return true;

@@ -88,8 +88,8 @@ function chunkSections(sections: PolishSectionInput[], viewTitle: string, maxCha
 
   for (const section of sections) {
     const sectionChars = JSON.stringify(section).length;
-    const exceedsCurrent = currentBatch.length > 0 && currentChars + sectionChars > maxChars;
-    if (exceedsCurrent) {
+
+    if (currentBatch.length > 0 && currentChars + sectionChars > maxChars) {
       batches.push(currentBatch);
       currentBatch = [];
       currentChars = JSON.stringify({ viewTitle, sections: [] }).length;
@@ -148,15 +148,22 @@ export async function polishSections(
   const cacheKeyBySectionId = new Map(uncached.map((entry) => [entry.section.sectionId, entry.cacheKey]));
 
   for (const batch of batches) {
+    const inputPayload = JSON.stringify({ viewTitle, sections: batch });
+    const estimatedOutputTokens = Math.min(16384, Math.max(8192, inputPayload.length));
+
     const responseText = await callAI(
       polishPrompt,
-      JSON.stringify({ viewTitle, sections: batch }),
+      inputPayload,
       config,
       config.model,
-      4096,
+      estimatedOutputTokens,
     );
 
     const parsed = parseJSON<PolishResponse>(responseText);
+    if (!parsed?.sections || parsed.sections.length === 0) {
+      const preview = responseText ? responseText.slice(0, 300) : '(null)';
+      console.warn(`  View polish batch failed: response had ${responseText?.length ?? 0} chars, parsed ${parsed?.sections?.length ?? 0} sections. Input: ${batch.length} sections, ${inputPayload.length} chars. Preview: ${preview}`);
+    }
     const polishedById = new Map<string, string>();
     for (const item of parsed?.sections ?? []) {
       if (item?.sectionId && typeof item.markdown === 'string' && item.markdown.trim().length > 0) {

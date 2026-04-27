@@ -33,7 +33,7 @@ session-memory 把这些对话变成 **8 个结构化的 markdown 文件**，构
 系统的核心是 **Canonical Signal Pipeline**——将 raw session 数据转化为结构化知识声明：
 
 ```
-数据源 → 适配器 → 三层提取 → 候选信号 → 质量门 → 确定性合并 → 信号存储 → 视图编译 → Markdown
+数据源 → 适配器 → 三层提取 → 候选信号 → 质量门 → 确定性合并 → 信号存储 → 视图编译 → Layer 4 LLM polish → Markdown
 ```
 
 7 种信号类型：`tech_preference` / `work_style` / `profile_fact` / `decision` / `pain_point` / `timeline_event` / `open_thread`
@@ -46,9 +46,27 @@ session-memory 把这些对话变成 **8 个结构化的 markdown 文件**，构
 | Layer 2 | 文本匹配 + 技术检测 | 极低 | 工作模式、技术偏好 |
 | Layer 3 | AI 批量提取 + 合并 | 低 | 决策日志、反复痛点、工作画像 |
 
-Layer 3 使用可配置模型提取（默认 anthropic/claude-haiku-4.5，可通过 config.yaml 覆盖为 gpt-5.4-mini 等；batch=30，峰值 90 并发），合并去重模型同样可配置。
+三层提取负责生成 canonical signals；在视图编译之后，系统还会执行独立的 **Layer 4 LLM polish** 输出后处理，用于提升中文可读性、结构一致性和术语表达，但不改变底层信号存储。
+
+Layer 3 使用可配置模型提取，默认模型为 `gpt-5.4-mini`；合并去重模型也可单独配置。默认 `batch_size=30`，Layer 3 单 session 提取阶段并发触发 3 次 AI 调用，因此这一阶段峰值约 90 并发（不含后续 consolidation、project summary、Layer 4 polish）。对超长输入，系统会在超过 `long_context_threshold` 后自动切换到 `long_context_model`。
+
 工作画像的核心画像由 AI 语义提取器生成（一次调用，综合 memory + 决策 + 项目分布）。
 项目描述由 AI batch 调用生成（render-time metadata，不存储）。
+
+### Layer 4 LLM polish（输出后处理）
+
+视图编译器先生成确定性的 sections；随后 Layer 4 按 view 使用独立 prompt 对这些 sections 做一次 LLM polish。目标：中文化表达、减少裸英文 jargon、统一结构与语气、修正不完整句子，但不补造新事实。此阶段只改最终 markdown 文案，不修改底层信号存储——**Layer 4 不是新的 canonical 提取层**，只是视图编译之后的输出后处理。
+
+开启后依赖与 Layer 3 相同的 AI 配置（`api_key` / `api_base_url`）。为降低重复成本带本地缓存（`.state/view-polish-cache.json`），支持单独配置模型、字符上限和 cache version。**注意缓存 key 不包含 prompt 内容**，因此修改 polish prompt 后如需强制重跑，需手动 bump `view_polish_cache_version`。
+
+### 关键配置
+
+与输出质量相关的关键配置主要分两类：
+
+- **长上下文路由**：`long_context_model`、`long_context_threshold`
+- **Layer 4 输出润色**：`view_polish_enabled`、`view_polish_model`、`view_polish_max_chars_per_call`、`view_polish_cache_version`
+
+完整示例见 `config.example.yaml`。
 
 ### 数据源
 
@@ -133,7 +151,9 @@ session-memory/
 │   │   │   ├── timeline.ts
 │   │   │   ├── open-thread.ts
 │   │   │   └── project-summary.ts # AI 项目描述生成
-│   │   └── views/                 # 视图编译器（thin compiler）
+│   │   └── views/                 # 视图编译器与 Layer 4 输出润色
+│   │       ├── polish.ts          # Layer 4：对 renderer 输出 sections 做 LLM polish（缓存 + 分 view prompt）
+│   │       ├── view-text.ts       # 输出清理工具（metadata 泄漏过滤 + 标签剥离）
 │   │       ├── tech-preferences.ts
 │   │       ├── work-profile.ts
 │   │       ├── decisions.ts

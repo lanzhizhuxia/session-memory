@@ -14,7 +14,7 @@ import {
 
 const MAX_DECISION_CHARS = 320;
 const MAX_RATIONALE_CHARS = 280;
-const MAX_TOPIC_CHARS = 80;
+const MAX_TOPIC_CHARS = 120;
 
 /** Status words that are not real decisions — skip these entries. */
 const STATUS_WORD_PATTERN = /^(问题|已修复|TODO|Review|PRD已完成|Bug|修复|完成|待处理|待办)$/i;

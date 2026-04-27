@@ -1,7 +1,7 @@
 # PRD: Session Memory — 开发者的数据分身
 
 Date: 2026-03-19
-Version: v0.7
+Version: v0.8
 Status: Implemented (all phases complete)
 
 ---
@@ -937,8 +937,8 @@ layer3:
 
 | 参数 | 值 | 理由 |
 |---|---|---|
-| 模型 | 可配置（默认 anthropic/claude-haiku-4.5，config.yaml 可覆盖为 gpt-5.4-mini 等） | 成本低、速度快，摘要任务不需要最强模型 |
-| 并发 | 30 sessions / batch（峰值 90 并发） | 每 session 3 AI 调用 |
+| 模型 | 可配置（提取默认 gpt-5.4-mini，合并默认 gpt-5.4，可通过 config.yaml 覆盖） | 提取阶段成本低、速度快；合并阶段用更强模型提升去重质量 |
+| 并发 | 30 sessions / batch（单 session 提取阶段峰值约 90 并发） | 单 session 并发 3 个提取 prompt；不含 consolidation / project summary / Layer 4 polish |
 | 上下文裁剪 | 每 session 取前 20 条消息 | 大部分决策在前半段对话中 |
 | 去重 | 按 session_id 幂等 | 支持增量重跑 |
 | 每个 session 跑 3 个 prompt | 决策 + 痛点 + 偏好 | 专注单维度，质量高 |
@@ -1451,11 +1451,11 @@ layer3:
   enabled: true             # 设为 false 跳过 AI 提取
   min_score: 3              # 加权分数 ≥ 此值进入 AI 分析
   max_sessions: 500         # 单次运行上限（safety cap）
-  batch_size: 30            # 每批并发 session 数（默认 30，每 session 3 AI 调用 = 峰值 90 并发）
-  # api_key: "sk-..."       # 或设置 ANTHROPIC_API_KEY 环境变量
+  batch_size: 30            # 每批并发 session 数（默认 30；单 session 提取阶段并发 3 个 prompt = 此阶段峰值约 90，不含 consolidation/polish）
+  # api_key: "sk-..."       # 或设置相应环境变量
   # api_base_url: "http://localhost:14265"  # LiteLLM proxy 或其他 OpenAI 兼容端点
-  # model: "anthropic/claude-haiku-4.5"          # 提取模型（默认 anthropic/claude-haiku-4.5）
-  # consolidation_model: "anthropic/claude-haiku-4.5"  # 合并去重模型
+  # model: "gpt-5.4-mini"                   # 提取模型（默认 gpt-5.4-mini）
+  # consolidation_model: "gpt-5.4"          # 合并去重模型（默认 gpt-5.4，比提取用更强的模型）
 
 # --- 输出 ---
 output_dir: "~/.local/share/session-memory"
@@ -1498,3 +1498,4 @@ memory:
 | v0.5 | 2026-03-19 | **实现正确性修复**（基于自审）：`open-threads.md` 从追加型改为聚合型（todo 状态会变，追加逻辑无法处理）；`.last-extraction.json` 的 `processed_sessions` 拆为 `layer3.processed_sessions`（Layer 1/2 纯靠时间戳增量，避免 ID 列表膨胀）；新增 §5.1.1 增量执行流程伪代码（显式说明 getMessages 只对新 session 调用）；§4 示例声明为简化版并指向 §6.1.2 正式规格；§3.2 补充 `noise_project_human_threshold` 的 session 级过滤实现路径；高价值 session 筛选从 `top N` 改为分数阈值 `≥ 3` + config 可配置；新增 §8.5 错误处理与恢复（AI 失败重试、crash 幂等、JSONL 损坏跳过）；明确 work-patterns 时段分布（原始数据）vs work-profile 工作节奏（AI 洞察）的边界 |
 | v0.6 | 2026-03-19 | **开工前最后一轮打磨**（基于二次自审）：`Todo` 接口补 `timeCreated?` 字段（open-threads 年龄显示依赖）；澄清 Layer 2 每次全量重跑 `getMessages` 取首条消息（成本可接受，不做中间缓存）；跨项目主题聚合从 open-threads 示例移除推迟到 Phase 2；新增 §8.6 完整 config.yaml 合并参考；adapter 接口补内部缓存实现建议；成本估算补双数据源说明 |
 | v0.7 | 2026-04-23 | **文档对齐实现**：输出文件从 7 → 8（新增 `本周重点.md`）；文件名从英文改为中文；§6.1 输出文件列表 + §6.2 输出目录同步更新；Layer 3 模型描述更新为可配置（默认 anthropic/claude-haiku-4.5）+ batch_size=30；§8.6 config.yaml 补充 memory 层 + batch_size + model 完整配置；输出目录补充 `.state/`（canonical signal store）、`cron.log`；状态从 Draft → Implemented |
+| v0.8 | 2026-04-27 | **模型默认值更新 + Layer 4 polish**：代码 fallback 从 `anthropic/claude-haiku-4.5` 改为提取 `gpt-5.4-mini` / 合并 `gpt-5.4`；新增长上下文路由（`long_context_model` / `long_context_threshold`，默认 `gemini-3.1-pro-preview` / 250000 字符）；新增 Layer 4 LLM view polish（视图编译后对最终 markdown 做中文化/结构化润色，带本地缓存，不回写 canonical signals）；§5.4.1 并发表述收窄为"单 session 提取阶段"，不再涵盖 consolidation/project summary/polish |

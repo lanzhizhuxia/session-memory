@@ -48,7 +48,7 @@ session-memory 把这些对话变成 **8 个结构化的 markdown 文件**，构
 
 三层提取负责生成 canonical signals；在视图编译之后，系统还会执行独立的 **Layer 4 LLM polish** 输出后处理，用于提升中文可读性、结构一致性和术语表达，但不改变底层信号存储。
 
-Layer 3 使用可配置模型提取，默认模型为 `gpt-5.4-mini`；合并去重模型也可单独配置。默认 `batch_size=30`，Layer 3 单 session 提取阶段并发触发 3 次 AI 调用，因此这一阶段峰值约 90 并发（不含后续 consolidation、project summary、Layer 4 polish）。对超长输入，系统会在超过 `long_context_threshold` 后自动切换到 `long_context_model`。
+Layer 3 使用可配置模型：提取阶段默认 `gpt-5.4-mini`，合并去重阶段默认 `gpt-5.4`（用更强模型提升合并质量）。默认 `batch_size=30`，Layer 3 单 session 提取阶段并发触发 3 次 AI 调用，因此这一阶段峰值约 90 并发（不含后续 consolidation、project summary、Layer 4 polish）。对超长输入，系统会在超过 `long_context_threshold` 后自动切换到 `long_context_model`。
 
 工作画像的核心画像由 AI 语义提取器生成（一次调用，综合 memory + 决策 + 项目分布）。
 项目描述由 AI batch 调用生成（render-time metadata，不存储）。

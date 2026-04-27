@@ -454,7 +454,7 @@ export async function runLayer3(
             ? config.long_context_model
             : undefined;
 
-          const sessionModelName = sessionModel ?? config.model ?? 'anthropic/claude-haiku-4.5';
+          const sessionModelName = sessionModel ?? config.model ?? 'gpt-5.4-mini';
           const [decisionRes, painRes, prefRes] = await Promise.all([
             callAI(DECISION_PROMPT, conversation, config, sessionModelName),
             callAI(PAIN_POINT_PROMPT, conversation, config, sessionModelName),
@@ -657,7 +657,7 @@ async function consolidateDecisions(decisions: Decision[], config: Layer3Config)
       continue;
     }
 
-    const cModel = config.consolidation_model ?? config.model ?? 'anthropic/claude-haiku-4.5';
+    const cModel = config.consolidation_model ?? config.model ?? 'gpt-5.4';
     const response = await callAI(CONSOLIDATE_DECISIONS_PROMPT, text, config, cModel, 8192);
     const parsed = parseJSON<{ decisions: unknown[] }>(response);
     if (Array.isArray(parsed?.decisions)) {
@@ -697,7 +697,7 @@ async function consolidatePainPoints(painPoints: PainPoint[], config: Layer3Conf
       sourceLabel: p.sourceLabel, projectName: p.projectName,
     }));
 
-    const cModel = config.consolidation_model ?? config.model ?? 'anthropic/claude-haiku-4.5';
+    const cModel = config.consolidation_model ?? config.model ?? 'gpt-5.4';
     const response = await callAI(CONSOLIDATE_PAIN_POINTS_PROMPT, JSON.stringify(input, null, 0), config, cModel, 8192);
     const parsed = parseJSON<{ pain_points: unknown[] }>(response);
     if (Array.isArray(parsed?.pain_points)) {
@@ -723,7 +723,7 @@ async function consolidatePreferences(preferences: Preference[], config: Layer3C
     batches.push(preferences.slice(i, i + BATCH_SIZE));
   }
 
-  const cModel = config.consolidation_model ?? config.model ?? 'anthropic/claude-haiku-4.5';
+  const cModel = config.consolidation_model ?? config.model ?? 'gpt-5.4';
   const consolidatedBatches: Preference[] = [];
 
   for (const batch of batches) {

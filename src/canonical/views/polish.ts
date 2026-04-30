@@ -17,6 +17,7 @@ export interface PolishSectionInput {
   sectionId: string;
   title: string;
   draftMarkdown: string;
+  signalIdsKey?: string;
 }
 
 interface PolishSectionOutput {
@@ -68,7 +69,7 @@ function saveCache(config: PolishConfig, cache: PolishCache): void {
 }
 
 function computeCacheKey(viewId: string, section: PolishSectionInput, config: PolishConfig): string {
-  return createHash('sha256')
+  const hash = createHash('sha256')
     .update(viewId)
     .update('\0')
     .update(section.sectionId)
@@ -77,8 +78,13 @@ function computeCacheKey(viewId: string, section: PolishSectionInput, config: Po
     .update('\0')
     .update(config.model)
     .update('\0')
-    .update(section.draftMarkdown)
-    .digest('hex');
+    .update(section.draftMarkdown);
+
+  if (section.signalIdsKey != null && section.signalIdsKey.length > 0) {
+    hash.update('\0').update(section.signalIdsKey);
+  }
+
+  return hash.digest('hex');
 }
 
 function chunkSections(sections: PolishSectionInput[], viewTitle: string, maxChars: number): PolishSectionInput[][] {

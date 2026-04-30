@@ -1,4 +1,5 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
+import { INVALID_TIMESTAMP } from '../merge.js';
 import { areNearDuplicateTexts, cleanEvidence, cleanProjectName, cleanTitle, finalizeMarkdownWithinBudget, localizeTrust } from './view-text.js';
 import { polishSections, type PolishConfig } from './polish.js';
 
@@ -16,6 +17,13 @@ const DECISIONS_POLISH_PROMPT = `你是一个技术决策日志编辑。输入�
 输出严格 JSON 格式：{ "sections": [{ "sectionId": "...", "markdown": "..." }] }`;
 
 type DecisionSignal = Extract<CanonicalSignal, { kind: 'decision' }>;
+
+const RECENT_SECTION_TITLE = '最近决策';
+const RECENT_SECTION_ID = '__recent__';
+const RECENT_DAYS = 3;
+const RECENT_RESERVE_ITEMS = 12;
+const RECENT_RESERVE_CHARS = 3500;
+const DAY_MS = 86_400_000;
 
 export const DECISIONS_BUDGET: ViewBudget = {
   viewId: 'decisions',
@@ -52,7 +60,7 @@ function effectiveDate(signal: DecisionSignal): string {
     const dateMatch = /^\d{4}-\d{2}-\d{2}/.exec(signal.payload.trigger);
     if (dateMatch != null) return dateMatch[0];
   }
-  if (signal.lastSeenAt > 0) {
+  if (signal.lastSeenAt > INVALID_TIMESTAMP) {
     return new Date(signal.lastSeenAt).toISOString().slice(0, 10);
   }
   return 'unknown';
@@ -103,6 +111,48 @@ function renderDecisionBlock(signal: DecisionSignal): string {
   return lines.join('\n');
 }
 
+function renderRecentDecisionEntry(signal: DecisionSignal, projectName: string): string {
+  const topic = cleanTitle(signal.payload.topic);
+  const decision = cleanTitle(signal.payload.decision);
+  const trustLabel = localizeTrust(signal.trustScore, signal.supportCount);
+  const projectTag = `**[${projectName}]**`;
+  if (areNearDuplicateTexts(topic, decision)) {
+    return `- ${projectTag} ${decision} _(${trustLabel})_`;
+  }
+  return `- ${projectTag} ${topic} — ${decision} _(${trustLabel})_`;
+}
+
+function buildRecentSection(
+  signals: DecisionSignal[],
+  projectNameById: Map<string, string>,
+): { markdown: string; signalIds: string[] } {
+  if (signals.length === 0) return { markdown: '', signalIds: [] };
+
+  const byDate = new Map<string, DecisionSignal[]>();
+  for (const signal of signals) {
+    const date = effectiveDate(signal);
+    const list = byDate.get(date) ?? [];
+    list.push(signal);
+    byDate.set(date, list);
+  }
+  const sortedDates = [...byDate.keys()].sort((left, right) => right.localeCompare(left));
+
+  const lines: string[] = [`## ${RECENT_SECTION_TITLE}`];
+  const signalIds: string[] = [];
+
+  for (const date of sortedDates) {
+    lines.push(`### ${date}`);
+    const entries = byDate.get(date) ?? [];
+    for (const signal of entries) {
+      const projectName = projectNameById.get(signal.id) ?? cleanProjectName(signal.projectNames[0], '未归类项目');
+      lines.push(renderRecentDecisionEntry(signal, projectName));
+      signalIds.push(signal.id);
+    }
+  }
+
+  return { markdown: `${lines.join('\n')}\n`, signalIds };
+}
+
 function buildMarkdown(header: string, sections: PublishedViewSection[], userNotes: string, metadata: string): string {
   const sectionMarkdown = sections.map((section) => section.markdown.trimEnd()).join('\n\n');
   const body = sectionMarkdown.length > 0 ? `\n${sectionMarkdown}\n\n` : '\n';
@@ -111,6 +161,32 @@ function buildMarkdown(header: string, sections: PublishedViewSection[], userNot
 
 function fitsBudget(markdown: string, budget: ViewBudget): boolean {
   return markdown.length <= budget.maxChars;
+}
+
+function pickRecentSignals(
+  sortedSignals: DecisionSignal[],
+  generatedAt: number,
+  maxItems: number,
+  maxChars: number,
+  projectNameById: Map<string, string>,
+): DecisionSignal[] {
+  const cutoffIso = new Date(generatedAt - RECENT_DAYS * DAY_MS).toISOString().slice(0, 10);
+  const todayIso = new Date(generatedAt).toISOString().slice(0, 10);
+  const picked: DecisionSignal[] = [];
+  let charBudget = maxChars;
+  for (const signal of sortedSignals) {
+    if (picked.length >= maxItems) break;
+    const date = effectiveDate(signal);
+    if (date === 'unknown') continue;
+    if (date < cutoffIso || date > todayIso) continue;
+    const projectName = projectNameById.get(signal.id) ?? cleanProjectName(signal.projectNames[0], '未归类项目');
+    const entry = renderRecentDecisionEntry(signal, projectName);
+    const cost = entry.length + 5;
+    if (cost > charBudget) break;
+    picked.push(signal);
+    charBudget -= cost;
+  }
+  return picked;
 }
 
 export async function compileDecisionsView(
@@ -124,13 +200,30 @@ export async function compileDecisionsView(
   const now = new Date(generatedAt);
   const header = fileHeader('决策日志');
   const metadata = fileMetadata(sourceSummary, now);
+  const decisionSignals = signals.filter((signal) => signal.status === 'active').filter(isDecisionSignal);
   const filtered = sortDecisionSignals(
-    signals.filter((signal) => signal.status === 'active').filter(isDecisionSignal),
+    decisionSignals.filter((signal) => signal.lastSeenAt > INVALID_TIMESTAMP),
   );
+
+  const projectNameById = new Map<string, string>();
+  for (const signal of filtered) {
+    projectNameById.set(signal.id, cleanProjectName(signal.projectNames[0], '未归类项目'));
+  }
+
+  const recentSignals = pickRecentSignals(
+    filtered,
+    generatedAt,
+    RECENT_RESERVE_ITEMS,
+    RECENT_RESERVE_CHARS,
+    projectNameById,
+  );
+  const recentIds = new Set(recentSignals.map((signal) => signal.id));
+  const recentSection = buildRecentSection(recentSignals, projectNameById);
 
   const grouped = new Map<string, DecisionSignal[]>();
   for (const signal of filtered) {
-    const project = cleanProjectName(signal.projectNames[0], '未归类项目');
+    if (recentIds.has(signal.id)) continue;
+    const project = projectNameById.get(signal.id) ?? cleanProjectName(signal.projectNames[0], '未归类项目');
     const list = grouped.get(project) ?? [];
     list.push(signal);
     grouped.set(project, list);
@@ -139,10 +232,22 @@ export async function compileDecisionsView(
   const sortedProjectNames = [...grouped.keys()].sort((left, right) => left.localeCompare(right));
 
   const draftSections: PublishedViewSection[] = [];
-  const sourceSignalIds: string[] = [];
+  const sectionIdByIndex: string[] = [];
+  const signalIdsKeyBySectionId = new Map<string, string>();
+
+  if (recentSection.markdown.length > 0) {
+    draftSections.push({
+      title: RECENT_SECTION_TITLE,
+      signalIds: recentSection.signalIds,
+      markdown: recentSection.markdown,
+    });
+    sectionIdByIndex.push(RECENT_SECTION_ID);
+    signalIdsKeyBySectionId.set(RECENT_SECTION_ID, recentSection.signalIds.join(','));
+  }
+  const sourceSignalIds: string[] = [...recentSection.signalIds];
   const maxItemsTotal = Math.min(budget.maxItemsTotal ?? Number.POSITIVE_INFINITY, budget.maxSignals ?? Number.POSITIVE_INFINITY);
   const userNotes = extractUserNotes(existingContent) ?? DEFAULT_USER_NOTES;
-  let itemsWritten = 0;
+  let itemsWritten = recentSection.signalIds.length;
 
   for (const projectName of sortedProjectNames) {
     if (itemsWritten >= maxItemsTotal) break;
@@ -188,12 +293,23 @@ export async function compileDecisionsView(
     if (sectionSignalIds.length === 0) continue;
 
     draftSections.push({ title: projectName, signalIds: sectionSignalIds, markdown: `${sectionLines.join('\n')}\n` });
+    sectionIdByIndex.push(projectName);
+    signalIdsKeyBySectionId.set(projectName, sectionSignalIds.join(','));
   }
 
+  const polishInputs = draftSections.map((section, idx) => {
+    const sectionId = sectionIdByIndex[idx];
+    return {
+      sectionId,
+      title: section.title,
+      draftMarkdown: section.markdown,
+      signalIdsKey: signalIdsKeyBySectionId.get(sectionId) ?? '',
+    };
+  });
   const polishedMarkdownById = await polishSections(
     budget.viewId,
     '决策日志',
-    draftSections.map((section) => ({ sectionId: section.title, title: section.title, draftMarkdown: section.markdown })),
+    polishInputs,
     DECISIONS_POLISH_PROMPT,
     polishConfig ?? {
       enabled: false,
@@ -204,10 +320,13 @@ export async function compileDecisionsView(
     },
   );
 
-  const sections = draftSections.map((section) => ({
-    ...section,
-    markdown: polishedMarkdownById.get(section.title) ?? section.markdown,
-  }));
+  const sections = draftSections.map((section, idx) => {
+    const sectionId = sectionIdByIndex[idx];
+    return {
+      ...section,
+      markdown: polishedMarkdownById.get(sectionId) ?? section.markdown,
+    };
+  });
 
   let finalSections = [...sections];
   let finalSignalIds = Array.from(new Set(sourceSignalIds));

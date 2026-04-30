@@ -1,5 +1,7 @@
 import { computeCanonicalKey, computeFingerprint, type CanonicalSignal, type SignalCandidate, type SignalKind } from './types.js';
 
+export const INVALID_TIMESTAMP = 0;
+
 interface MergeAccumulator {
   members: SignalCandidate[];
   existing?: CanonicalSignal;
@@ -7,11 +9,11 @@ interface MergeAccumulator {
 
 function toTimestamp(observedAt?: string, fallback?: number): number {
   if (observedAt == null) {
-    return fallback ?? Date.now();
+    return fallback ?? INVALID_TIMESTAMP;
   }
 
   const parsed = Date.parse(observedAt);
-  return Number.isNaN(parsed) ? (fallback ?? Date.now()) : parsed;
+  return Number.isNaN(parsed) ? (fallback ?? INVALID_TIMESTAMP) : parsed;
 }
 
 function summarizeCandidatePayload(candidate: SignalCandidate): string {

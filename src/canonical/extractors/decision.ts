@@ -56,6 +56,17 @@ function clamp(value: string, maxChars: number): string {
   return `${trimmed.slice(0, maxChars - 1).trim()}…`;
 }
 
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+
+function normalizeDecisionObservedAt(rawDate: string | undefined | null): string | undefined {
+  if (rawDate == null) return undefined;
+  const trimmed = rawDate.trim();
+  if (trimmed.length === 0) return undefined;
+  if (!ISO_DATE_PATTERN.test(trimmed)) return undefined;
+  if (Number.isNaN(Date.parse(trimmed))) return undefined;
+  return trimmed;
+}
+
 function buildEvidenceId(prefix: string, stableKey: string): string {
   return computeContentHash(`${prefix}:${stableKey}`);
 }
@@ -131,6 +142,7 @@ function extractFromLayer3Decisions(
     const scope = deriveScope(d.projectName);
 
     const evidenceId = buildEvidenceId('layer3-decision', `${d.sessionId}:${d.what}`);
+    const observedAt = normalizeDecisionObservedAt(d.date);
     const evidenceRecord: EvidenceRecord = {
       id: evidenceId,
       sourceKind: 'session_message',
@@ -140,7 +152,7 @@ function extractFromLayer3Decisions(
       content: `${d.what}${d.why ? ` — ${d.why}` : ''}`,
       contentHash: computeContentHash(`${d.sessionId}:${d.what}:${d.why ?? ''}`),
       capturedAt: Date.now(),
-      observedAt: d.date,
+      observedAt,
       trustScore: 3,
       recencyScore: 0.7,
       extractionHints: ['decision'],
@@ -189,6 +201,7 @@ function extractFromMemoryDecisions(
     const trustScore: 4 | 5 = md.sourceLabel === 'rule' ? 5 : 4;
 
     const evidenceId = buildEvidenceId('memory-decision', `${md.stableId}:${md.what}`);
+    const observedAt = normalizeDecisionObservedAt(md.date);
     const evidenceRecord: EvidenceRecord = {
       id: evidenceId,
       sourceKind: 'memory_file',
@@ -198,7 +211,7 @@ function extractFromMemoryDecisions(
       content: `${md.what}${md.why ? ` — ${md.why}` : ''}`,
       contentHash: computeContentHash(`${md.stableId}:${md.what}:${md.why ?? ''}`),
       capturedAt: Date.now(),
-      observedAt: md.date,
+      observedAt,
       trustScore,
       recencyScore: 1,
       extractionHints: ['decision'],

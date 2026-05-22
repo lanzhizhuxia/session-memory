@@ -1,7 +1,15 @@
-import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
+import type {
+  CanonicalSignal,
+  PublishedView,
+  PublishedViewArchiveIndexEntry,
+  PublishedViewSection,
+  ViewBudget,
+} from '../types.js';
 import { INVALID_TIMESTAMP } from '../merge.js';
 import { areNearDuplicateTexts, cleanEvidence, cleanProjectName, cleanTitle, finalizeMarkdownWithinBudget, localizeTrust } from './view-text.js';
 import { polishSections, type PolishConfig } from './polish.js';
+import { MODEL_DEFAULTS } from '../../utils/model-defaults.js';
+import { buildArchive, renderHistoryIndexSection, type MonthlyBucket } from './archive.js';
 
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
 const DECISIONS_POLISH_PROMPT = `你是一个技术决策日志编辑。输入是按项目分组的技术决策记录草稿，输出是润色后的中文版本。
@@ -313,7 +321,7 @@ export async function compileDecisionsView(
     DECISIONS_POLISH_PROMPT,
     polishConfig ?? {
       enabled: false,
-      model: 'gpt-5.4-mini',
+      model: MODEL_DEFAULTS.polish,
       max_chars_per_call: 24000,
       cache_version: 'v1',
       cache_dir: '.state',
@@ -364,4 +372,197 @@ export async function compileDecisionsView(
     sections: finalSections,
     markdown: boundedMarkdown,
   };
+}
+
+export const DECISIONS_ARCHIVE_BUDGET: ViewBudget = {
+  viewId: 'decisions',
+  buildMode: 'full_rebuild',
+  maxChars: Number.MAX_SAFE_INTEGER,
+  overflowPolicy: 'truncate',
+  modality: 'event',
+  retention: {
+    mode: 'archive_by_month',
+    currentMonths: 12,
+    archivePath: 'archive/决策日志-archive.md',
+  },
+};
+
+function effectiveTimestamp(signal: DecisionSignal): number {
+  if (signal.payload.trigger != null && signal.payload.trigger.length > 0) {
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(signal.payload.trigger);
+    if (m != null) {
+      const parsed = Date.parse(`${m[1]}T12:00:00Z`);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  if (signal.lastSeenAt > INVALID_TIMESTAMP) return signal.lastSeenAt;
+  if (signal.firstSeenAt > INVALID_TIMESTAMP) return signal.firstSeenAt;
+  return 0;
+}
+
+function renderDecisionEntry(signal: DecisionSignal): string {
+  const date = effectiveDate(signal);
+  const projectName = cleanProjectName(signal.projectNames[0], '未归类项目');
+  const topic = cleanTitle(signal.payload.topic);
+  const decision = cleanTitle(signal.payload.decision);
+  const rationale = cleanEvidence(signal.payload.rationale, 250);
+  const alternatives = signal.payload.alternatives
+    .map((item) => cleanEvidence(item, 120))
+    .filter((item) => item.length > 0);
+  const lines: string[] = [];
+  lines.push(`### ${date} · [${projectName}]`);
+  if (!areNearDuplicateTexts(topic, decision)) {
+    lines.push(`- **主题**: ${topic}`);
+  }
+  lines.push(`- **决定**: ${decision}`);
+  if (rationale.length > 0 && rationale !== decision) {
+    lines.push(`- **理由**: ${rationale}`);
+  }
+  if (alternatives.length > 0) {
+    lines.push(`- **替代方案**: ${alternatives.join('，')}`);
+  }
+  lines.push(`- **依据强度**: ${localizeTrust(signal.trustScore, signal.supportCount)}`);
+  lines.push('');
+  return lines.join('\n');
+}
+
+function renderBucketGroupForDecisions(buckets: MonthlyBucket[]): { markdown: string; sections: PublishedViewSection[] } {
+  if (buckets.length === 0) return { markdown: '', sections: [] };
+  const sections: PublishedViewSection[] = [];
+  const parts: string[] = [];
+  for (const b of buckets) {
+    const decisionSignals = b.signals.filter(isDecisionSignal);
+    const sortedInBucket = sortDecisionSignals(decisionSignals);
+    const sectionLines: string[] = [`## ${b.yearMonth}`, ''];
+    const sectionIds: string[] = [];
+    for (const s of sortedInBucket) {
+      sectionLines.push(renderDecisionEntry(s));
+      sectionIds.push(s.id);
+    }
+    const sectionMd = sectionLines.join('\n');
+    parts.push(sectionMd);
+    sections.push({ title: b.yearMonth, signalIds: sectionIds, markdown: sectionMd });
+  }
+  return { markdown: parts.join('\n'), sections };
+}
+
+function archiveFileHeader(metadata: string, archivePath: string | undefined): string {
+  const archiveDirective = archivePath != null ? `\n<!-- archive: ${archivePath} -->\n` : '';
+  return `<!-- modality: event -->\n<!-- retention: archive_by_month(currentMonths=12) -->${archiveDirective}# 决策日志\n\n${metadata}`;
+}
+
+function archiveSubFileHeader(metadata: string): string {
+  return `<!-- modality: event -->\n<!-- retention: archive (overflow from 决策日志.md) -->\n# 决策日志 · 历史归档\n\n${metadata}`;
+}
+
+export interface CompileDecisionsArchiveResult {
+  view: PublishedView;
+  archiveMarkdown: string;
+}
+
+function renderUndatedSection(undatedSignals: DecisionSignal[]): { markdown: string; section: PublishedViewSection | null } {
+  if (undatedSignals.length === 0) return { markdown: '', section: null };
+  const sorted = sortDecisionSignals(undatedSignals);
+  const lines: string[] = ['## 未定日期', ''];
+  const ids: string[] = [];
+  for (const s of sorted) {
+    const projectName = cleanProjectName(s.projectNames[0], '未归类项目');
+    const topic = cleanTitle(s.payload.topic);
+    const decision = cleanTitle(s.payload.decision);
+    const rationale = cleanEvidence(s.payload.rationale, 250);
+    const alternatives = s.payload.alternatives
+      .map((item) => cleanEvidence(item, 120))
+      .filter((item) => item.length > 0);
+    lines.push(`### 未定日期 · [${projectName}]`);
+    if (!areNearDuplicateTexts(topic, decision)) {
+      lines.push(`- **主题**: ${topic}`);
+    }
+    lines.push(`- **决定**: ${decision}`);
+    if (rationale.length > 0 && rationale !== decision) {
+      lines.push(`- **理由**: ${rationale}`);
+    }
+    if (alternatives.length > 0) {
+      lines.push(`- **替代方案**: ${alternatives.join('，')}`);
+    }
+    lines.push(`- **依据强度**: ${localizeTrust(s.trustScore, s.supportCount)}`);
+    if (s.payload.trigger != null && s.payload.trigger.length > 0) {
+      lines.push(`- **trigger（无可解析日期）**: ${cleanEvidence(s.payload.trigger, 200)}`);
+    }
+    lines.push('');
+    ids.push(s.id);
+  }
+  const markdown = lines.join('\n');
+  return { markdown, section: { title: '未定日期', signalIds: ids, markdown } };
+}
+
+export async function compileDecisionsArchiveView(
+  signals: CanonicalSignal[],
+  budget: ViewBudget,
+  sourceSummary: string,
+  existingContent?: string,
+  _polishConfig?: PolishConfig,
+): Promise<CompileDecisionsArchiveResult> {
+  if (budget.retention?.mode !== 'archive_by_month') {
+    throw new Error('compileDecisionsArchiveView requires retention.mode=archive_by_month');
+  }
+  const generatedAt = Date.now();
+  const now = new Date(generatedAt);
+  const metadata = `<!-- generated: ${now.toISOString()} | sources: ${sourceSummary} -->\n\n`;
+
+  const allActiveDecisions = signals
+    .filter((s) => s.status === 'active')
+    .filter(isDecisionSignal);
+  const datedSignals = allActiveDecisions.filter((s) => effectiveTimestamp(s) > 0);
+  const undatedSignals = allActiveDecisions.filter((s) => effectiveTimestamp(s) <= 0);
+
+  const archive = buildArchive({
+    signals: datedSignals as CanonicalSignal[],
+    effectiveTimestamp: (s) => effectiveTimestamp(s as DecisionSignal),
+    currentMonths: budget.retention.currentMonths,
+    nowMs: generatedAt,
+  });
+
+  const userNotes = extractUserNotes(existingContent) ?? DEFAULT_USER_NOTES;
+  const archivePath = budget.retention.archivePath;
+
+  const currentRender = renderBucketGroupForDecisions(archive.currentBuckets);
+  const undatedRender = renderUndatedSection(undatedSignals);
+  const indexSection = renderHistoryIndexSection(archive.index, archivePath);
+
+  const mainHeader = archiveFileHeader(metadata, archivePath);
+  const mainBodyParts: string[] = [];
+  if (currentRender.markdown.length > 0) mainBodyParts.push(currentRender.markdown);
+  if (undatedRender.markdown.length > 0) mainBodyParts.push(undatedRender.markdown);
+  const mainBody = mainBodyParts.length > 0 ? `${mainBodyParts.join('\n\n')}\n\n` : '';
+  const mainTail = `${indexSection}\n${userNotes}\n`;
+  const mainMarkdown = `${mainHeader}${mainBody}${mainTail}`;
+
+  const archiveRender = renderBucketGroupForDecisions(archive.archiveBuckets);
+  const archiveMarkdown = archive.archiveBuckets.length > 0
+    ? `${archiveSubFileHeader(metadata)}${archiveRender.markdown}\n`
+    : '';
+
+  const sourceSignalIds: string[] = [];
+  for (const b of archive.currentBuckets) for (const s of b.signals) sourceSignalIds.push(s.id);
+  for (const b of archive.archiveBuckets) for (const s of b.signals) sourceSignalIds.push(s.id);
+  for (const s of undatedSignals) sourceSignalIds.push(s.id);
+
+  const archiveIndex: PublishedViewArchiveIndexEntry[] = archive.index;
+
+  const sections = [...currentRender.sections];
+  if (undatedRender.section != null) sections.push(undatedRender.section);
+
+  const view: PublishedView = {
+    viewId: budget.viewId,
+    title: '决策日志',
+    generatedAt,
+    sourceSignalIds,
+    budget,
+    sections,
+    markdown: mainMarkdown,
+    archiveFile: archivePath,
+    archiveIndex,
+  };
+
+  return { view, archiveMarkdown };
 }

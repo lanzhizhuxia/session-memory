@@ -40,8 +40,8 @@ layer3:
   # 模型配置（注意：模型名需与代理实际暴露名称一致）
   # api_key: "sk-..."       # 或设置相应环境变量
   # api_base_url: "http://localhost:14265"   # LiteLLM proxy 或其他 OpenAI 兼容端点
-  # model: "gpt-5.4-mini"                    # Layer 3 提取模型（默认 gpt-5.4-mini）
-  # consolidation_model: "gpt-5.4"           # Layer 3 合并去重模型（默认 gpt-5.4；比提取用更强的模型提升合并质量）
+# model: "gpt-5.4-mini"                    # Layer 3 提取模型（默认 gpt-5.4-mini）
+# consolidation_model: "gpt-5.5"           # Layer 3 合并去重模型（默认 gpt-5.5；比提取用更强的模型提升合并质量）
 
   # 长上下文路由（高级调优）
   # long_context_model: "gemini-3.1-pro-preview"   # 超长输入时切换使用
@@ -49,7 +49,7 @@ layer3:
 
   # Layer 4 输出润色（常用开关）
   # view_polish_enabled: true               # 是否对最终 view markdown 做 LLM 润色
-  # view_polish_model: "gpt-5.4-mini"       # Layer 4 polish 模型
+  # view_polish_model: "deepseek-v4-flash"    # Layer 4 polish 模型
 
   # Layer 4 输出润色（高级调优）
   # view_polish_max_chars_per_call: 24000   # 单次 polish 输入字符上限；默认 24000

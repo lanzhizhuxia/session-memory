@@ -9,6 +9,7 @@ import type { AdapterRegistry } from '../adapters/registry.js';
 import type { NoiseFilter } from '../utils/noise-filter.js';
 import { computeContentHash, type MemoryDecision, type MemoryPainPoint, type MemoryProfileEntry } from '../memory/types.js';
 import { callAI, parseJSON } from '../utils/ai-client.js';
+import { MODEL_DEFAULTS } from '../utils/model-defaults.js';
 
 // ============================================================
 // Types
@@ -450,11 +451,11 @@ export async function runLayer3(
 
           const charCount = conversation.length;
           const threshold = config.long_context_threshold ?? 250000;
-          const sessionModel = charCount > threshold && config.long_context_model
-            ? config.long_context_model
+          const sessionModel = charCount > threshold
+            ? (config.long_context_model ?? MODEL_DEFAULTS.longContext)
             : undefined;
 
-          const sessionModelName = sessionModel ?? config.model ?? 'gpt-5.4-mini';
+          const sessionModelName = sessionModel ?? config.model ?? MODEL_DEFAULTS.extraction;
           const [decisionRes, painRes, prefRes] = await Promise.all([
             callAI(DECISION_PROMPT, conversation, config, sessionModelName),
             callAI(PAIN_POINT_PROMPT, conversation, config, sessionModelName),
@@ -657,7 +658,7 @@ async function consolidateDecisions(decisions: Decision[], config: Layer3Config)
       continue;
     }
 
-    const cModel = config.consolidation_model ?? config.model ?? 'gpt-5.4';
+    const cModel = config.consolidation_model ?? config.model ?? MODEL_DEFAULTS.consolidation;
     const response = await callAI(CONSOLIDATE_DECISIONS_PROMPT, text, config, cModel, 8192);
     const parsed = parseJSON<{ decisions: unknown[] }>(response);
     if (Array.isArray(parsed?.decisions)) {
@@ -697,7 +698,7 @@ async function consolidatePainPoints(painPoints: PainPoint[], config: Layer3Conf
       sourceLabel: p.sourceLabel, projectName: p.projectName,
     }));
 
-    const cModel = config.consolidation_model ?? config.model ?? 'gpt-5.4';
+    const cModel = config.consolidation_model ?? config.model ?? MODEL_DEFAULTS.consolidation;
     const response = await callAI(CONSOLIDATE_PAIN_POINTS_PROMPT, JSON.stringify(input, null, 0), config, cModel, 8192);
     const parsed = parseJSON<{ pain_points: unknown[] }>(response);
     if (Array.isArray(parsed?.pain_points)) {
@@ -723,7 +724,7 @@ async function consolidatePreferences(preferences: Preference[], config: Layer3C
     batches.push(preferences.slice(i, i + BATCH_SIZE));
   }
 
-  const cModel = config.consolidation_model ?? config.model ?? 'gpt-5.4';
+  const cModel = config.consolidation_model ?? config.model ?? MODEL_DEFAULTS.consolidation;
   const consolidatedBatches: Preference[] = [];
 
   for (const batch of batches) {

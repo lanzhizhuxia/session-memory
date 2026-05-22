@@ -180,6 +180,26 @@ export type CanonicalSignal =
 
 export type ViewBuildMode = 'full_rebuild' | 'append_only' | 'rolling_window';
 
+export type ViewModality =
+  | 'event'
+  | 'state'
+  | 'thread'
+  | 'derived_claim'
+  | 'derived_view'
+  | 'hybrid';
+
+export type ViewRetention =
+  | { mode: 'full' }
+  | { mode: 'bounded'; maxItemsTotal: number; maxChars?: number }
+  | { mode: 'rolling_window'; days: number; maxChars?: number }
+  | { mode: 'archive_by_month'; currentMonths: number; archivePath?: string; maxCharsCurrent?: number };
+
+export interface PolishEntryRef {
+  signalId: string;
+  date?: string;
+  sessionRef?: string;
+}
+
 export interface ViewBudget {
   viewId: string;
   buildMode: ViewBuildMode;
@@ -190,12 +210,20 @@ export interface ViewBudget {
   maxItemsPerSection?: number;
   sections?: string[];
   overflowPolicy: 'truncate' | 'summarize' | 'drop_low_score';
+  modality?: ViewModality;
+  retention?: ViewRetention;
 }
 
 export interface PublishedViewSection {
   title: string;
   signalIds: string[];
   markdown: string;
+}
+
+export interface PublishedViewArchiveIndexEntry {
+  yearMonth: string;
+  location: 'current' | 'archive';
+  count: number;
 }
 
 export interface PublishedView {
@@ -206,6 +234,8 @@ export interface PublishedView {
   budget: ViewBudget;
   sections: PublishedViewSection[];
   markdown: string;
+  archiveFile?: string;
+  archiveIndex?: PublishedViewArchiveIndexEntry[];
 }
 
 export function normalize(input: string, maxChars?: number): string {

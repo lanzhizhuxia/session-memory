@@ -7,6 +7,7 @@ import {
   shouldHideAsNoise,
 } from './view-text.js';
 import { polishSections, type PolishConfig } from './polish.js';
+import { MODEL_DEFAULTS } from '../../utils/model-defaults.js';
 
 type TimelineSignal = Extract<CanonicalSignal, { kind: 'timeline_event' }>;
 
@@ -248,7 +249,7 @@ export async function compileTimelineView(
     TIMELINE_POLISH_PROMPT,
     polishConfig ?? {
       enabled: false,
-      model: 'gpt-5.4-mini',
+      model: MODEL_DEFAULTS.polish,
       max_chars_per_call: 24000,
       cache_version: 'v1',
       cache_dir: '.state',

@@ -1,6 +1,7 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
 import { cleanEvidence, dedupeByNormalizedText, finalizeMarkdownWithinBudget } from './view-text.js';
 import { polishSections, type PolishConfig } from './polish.js';
+import { MODEL_DEFAULTS } from '../../utils/model-defaults.js';
 
 const DIMENSION_ORDER = ['交互风格', '语言偏好', '技术审美', '工作节奏'];
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
@@ -342,7 +343,7 @@ export async function compileWorkProfileView(
     WORK_PROFILE_POLISH_PROMPT,
     polishConfig ?? {
       enabled: false,
-      model: 'gpt-5.4-mini',
+      model: MODEL_DEFAULTS.polish,
       max_chars_per_call: 24000,
       cache_version: 'v1',
       cache_dir: '.state',

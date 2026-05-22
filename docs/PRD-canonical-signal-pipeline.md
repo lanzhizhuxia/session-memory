@@ -1,9 +1,9 @@
 # PRD: Canonical Signal Pipeline 架构重设计
 > session-memory 从「文件中心」到「信号中心」的根本性架构升级
 
-- 版本: v0.3
-- 日期: 2026-04-09
-- 状态: Implemented (Phase 1-4 complete)
+- 版本: v0.3.1
+- 日期: 2026-04-09 (v0.3) / 2026-05-22 (v0.3.1 deferral notes)
+- 状态: Implemented (Phase 1-4 complete); §3.5 / §4.4 / §4.5 部分被 PRD-modality-split.md v0.2.1 取代
 - 关联: 主 PRD (PRD.md), Memory PRD (PRD-memory-integration.md)
 
 ---
@@ -456,6 +456,14 @@ export type CanonicalSignal =
 
 ### 3.5 ViewBudget 与 PublishedView
 
+> ⚠️ **本章节自 2026-05-22 起被 [PRD-modality-split.md](./PRD-modality-split.md) v0.2.1 部分取代。** 当 modality-split 的 Phase A 落地后：
+> - `ViewBudget` 增加 `modality: ViewModality` 与 `retention: ViewRetention` 两个字段；
+> - `retention` 是新 view compiler 的唯一权威；本节定义的 `buildMode / maxItemsTotal / maxChars` 仅作 legacy compiler 兼容字段保留；
+> - 视图类型枚举（`full_rebuild` / `append_only` / `rolling_window`）扩展为更精细的 `ViewRetention` 联合（`full | bounded | rolling_window | archive_by_month`）；
+> - `每文件推荐预算值`（§3.5 末尾表格）的具体数值仍然适用，但语义层从"top-N 截断"转为"主文件 + archive 合计 full retention"——event-modality 信号不再被 trustScore 排名挤出。
+>
+> 实施过渡期 modality-split 内 §4.1 Retention precedence 与 §6.2 Phase A 时间线，是这两份 PRD 的对齐入口。本节内容保留作为 v0.3 历史参考与 Phase A 完成前的兼容契约。
+
 ```typescript
 export type ViewBuildMode = 'full_rebuild' | 'append_only' | 'rolling_window';
 
@@ -654,6 +662,14 @@ interface RelevanceClassifier {
 
 ### 4.4 规范化合并
 
+> ⚠️ **本节合并语义将在 [PRD-modality-split.md](./PRD-modality-split.md) Phase B 按 temporality 分流：**
+> - `event` 类（decision / pain_point / timeline_event）：fingerprint 完全一致才 dedup，**不允许 supersede**；不同 canonicalKey 的 event 永远是不同事件。
+> - `state` 类（tech_preference / profile_fact）：保持当前 supersede 链语义。
+> - `thread` 类（open_thread）：lifecycle 合并；close event 触发 status='closed'。
+> - `derived_claim` 类（work_style）：同 state，但需 evidence 数量阈值后才允许 supersede。
+>
+> Phase A（v0.2.1 的最小落地范围）不修改本节合并主路径；仅由 modality-split §6.3 提供一次性 migration 修复因 modality 错配产生的次生 superseded。
+
 目标：把大量相似候选收敛成少量高质量 `CanonicalSignal`。
 
 合并顺序必须“确定性优先”：
@@ -737,6 +753,12 @@ normalize(input: string, maxChars?: number): string
 这样做的目标不是“让 AI 再总结一遍”，而是“帮助把确定性合并后的残余碎片收敛成更干净的单条规范信号”。
 
 ### 4.5 视图编译
+
+> ⚠️ **本节自 2026-05-22 起被 [PRD-modality-split.md](./PRD-modality-split.md) v0.2.1 扩展：**
+> - 新增 `archive_by_month` 渲染模式（主文件 + archive 文件 + 历史索引 section + publish-manifest 集成）；
+> - Layer 4 polish 对 event-shaped section 启用 strict mode：用 `<!-- entry: signalId=... -->` HTML marker 校验 polish 不丢/不并/不改 entry，否则该 section 整批 fallback；
+> - 薄编译器原则不变；archive 渲染仅做按月分桶 + 历史索引生成，不引入新的智能逻辑；
+> - `derived view metadata`（如项目时间线 `<!-- desc: ... -->`）的语义保留，在 modality-split 中重命名为 `derived_view`。
 
 目标：从 `CanonicalSignal` 生成可消费的 markdown 文件。
 
@@ -1282,6 +1304,7 @@ normalize(input: string, maxChars?: number): string
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.3.1 | 2026-05-22 | Deferral 注释。在 §3.5 / §4.4 / §4.5 添加指向 `PRD-modality-split.md` v0.2.1 的引用，标记 ViewBudget 字段扩展（modality + retention）、merge 按 temporality 分流（Phase B）、archive_by_month 渲染模式与 Layer 4 polish strict mode 的去向。本节内容保留为 v0.3 的兼容契约与历史参考。 |
 | v0.2.1 | 2026-04-08 | 补全 `timeline_event` 和 `open_thread` 的 canonicalKey 公式（Oracle 终审反馈）。 |
 | v0.2 | 2026-04-08 | 架构评审修订 + 下游需求补充。(1) 明确 supersede `PRD-memory-integration.md` 的旧目标架构，仅保留其数据源清单为参考，并将 Phase 3A 代码定义为过渡实现。(2) 在 §3 新增 `RelevanceClassifier`，并明确自 Phase 1 起接入主干，而非延后到 Phase 4。(3) 修正 QualityGate / merge 边界：重复检测移至 §4.4 合并阶段，质量关卡只评估单条候选内在质量。(4) 新增 `profile_fact` signal kind、质量规则、`工作画像.md` 顶部 `核心画像` 结构化编译规则。(5) 在 §4.4 补充 canonical key 生成规则、`normalize()` 规范、定量阈值与 quarantine 规则。(6) 缩窄 Phase 1 为 1a `tech_preference` 最小切片 + 1b `work_style` 最小桥接，并增加针对 `技术偏好.md` / `工作画像.md` 既有坏输出的验收标准。(7) 新增迁移期双通道编排，明确 `.state/` 与 `.last-extraction.json` 并存策略。(8) 在 §4.5 引入 derived view metadata，并为 `项目时间线.md` 增加项目级一行描述 `<!-- desc: ... -->` 规则。(9) 在 §3.5 新增 rolling-window 视图类型与 `weekly_focus` / `本周重点.md` 预算与编译规范。(10) 统一补充时间字段格式：时间戳用 Unix ms，字符串日期用 ISO `YYYY-MM-DD`。 |
 | v0.1 | 2026-04-08 | 初版。提出 Canonical Signal Pipeline，定义 claim-centric 核心模型、质量关卡、规范化合并、预算编译与分阶段落地路径。 |

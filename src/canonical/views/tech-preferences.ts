@@ -1,6 +1,7 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
 import { cleanEvidence, finalizeMarkdownWithinBudget, localizeStance } from './view-text.js';
 import { polishSections, type PolishConfig } from './polish.js';
+import { MODEL_DEFAULTS } from '../../utils/model-defaults.js';
 
 const CATEGORY_ORDER = ['前端', '后端', 'AI', '工具', '部署'];
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
@@ -232,7 +233,7 @@ export async function compileTechPreferencesView(
     TECH_PREFERENCES_POLISH_PROMPT,
     polishConfig ?? {
       enabled: false,
-      model: 'gpt-5.4-mini',
+      model: MODEL_DEFAULTS.polish,
       max_chars_per_call: 24000,
       cache_version: 'v1',
       cache_dir: '.state',

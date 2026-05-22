@@ -1,6 +1,7 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
 import { cleanEvidence, cleanTitle, finalizeMarkdownWithinBudget, localizeRecurrence, localizeTrust } from './view-text.js';
 import { polishSections, type PolishConfig } from './polish.js';
+import { MODEL_DEFAULTS } from '../../utils/model-defaults.js';
 
 const DEFAULT_USER_NOTES = '<!-- user notes -->\n<!-- 在此处添加个人备注，全量重建时不会被覆盖 -->\n<!-- /user notes -->';
 const PAIN_POINTS_POLISH_PROMPT = `你是一个技术问题诊断编辑。输入是反复出现的技术痛点记录草稿，输出是润色后的中文版本。
@@ -148,7 +149,7 @@ export async function compilePainPointsView(
     PAIN_POINTS_POLISH_PROMPT,
     polishConfig ?? {
       enabled: false,
-      model: 'gpt-5.4-mini',
+      model: MODEL_DEFAULTS.polish,
       max_chars_per_call: 24000,
       cache_version: 'v1',
       cache_dir: '.state',

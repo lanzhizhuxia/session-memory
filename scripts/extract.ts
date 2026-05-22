@@ -38,7 +38,7 @@ import { extractOpenThreadCandidates } from '../src/canonical/extractors/open-th
 import { generateProjectDescriptions } from '../src/canonical/extractors/project-summary.js';
 import { TECH_PREFS_BUDGET, compileTechPreferencesView } from '../src/canonical/views/tech-preferences.js';
 import { WORK_PROFILE_BUDGET, compileWorkProfileView } from '../src/canonical/views/work-profile.js';
-import { DECISIONS_BUDGET, compileDecisionsView } from '../src/canonical/views/decisions.js';
+import { DECISIONS_BUDGET, DECISIONS_ARCHIVE_BUDGET, compileDecisionsView, compileDecisionsArchiveView } from '../src/canonical/views/decisions.js';
 import { PAIN_POINTS_BUDGET, compilePainPointsView } from '../src/canonical/views/pain-points.js';
 import { TIMELINE_BUDGET, compileTimelineView } from '../src/canonical/views/timeline.js';
 import { OPEN_THREADS_BUDGET, compileOpenThreadsView } from '../src/canonical/views/open-threads.js';
@@ -46,6 +46,7 @@ import { WEEKLY_FOCUS_BUDGET, compileWeeklyFocusView } from '../src/canonical/vi
 import type { PolishConfig } from '../src/canonical/views/polish.js';
 import type { QuarantineRecord } from '../src/canonical/store.js';
 import type { SignalCandidate, SignalKind, ViewBudget, EvidenceRecord } from '../src/canonical/types.js';
+import { MODEL_DEFAULTS } from '../src/utils/model-defaults.js';
 
 interface CanonicalTechSession extends Session {
   canonicalProjectPath?: string;
@@ -108,6 +109,7 @@ interface Config {
       max_items_per_section?: number;
       max_sections?: number;
     };
+    decisions_archive_mode?: boolean;
   };
   output_dir?: string;
 }
@@ -422,7 +424,7 @@ async function main(): Promise<void> {
 
   const polishConfig: PolishConfig = {
     enabled: config.layer3?.view_polish_enabled ?? false,
-    model: config.layer3?.view_polish_model ?? config.layer3?.model ?? 'gpt-5.4-mini',
+    model: config.layer3?.view_polish_model ?? config.layer3?.model ?? MODEL_DEFAULTS.polish,
     api_key: config.layer3?.api_key,
     api_base_url: config.layer3?.api_base_url,
     max_chars_per_call: config.layer3?.view_polish_max_chars_per_call ?? 24000,
@@ -718,8 +720,8 @@ async function main(): Promise<void> {
       console.log(`  Pain points: ${ppStats.signals} canonical (${ppStats.candidates} candidates, ${ppStats.quarantined} quarantined)`);
 
       const profileFactAIConfig: ProfileFactAIConfig | undefined =
-        config.layer3?.api_key && config.layer3?.api_base_url && config.layer3?.model
-          ? { api_key: config.layer3.api_key, api_base_url: config.layer3.api_base_url, model: config.layer3.model }
+        config.layer3?.api_key && config.layer3?.api_base_url
+          ? { api_key: config.layer3.api_key, api_base_url: config.layer3.api_base_url, model: config.layer3.model ?? MODEL_DEFAULTS.extraction }
           : undefined;
 
       const profileFactAIContext = buildProfileFactAIContext(canonicalStore);
@@ -737,13 +739,38 @@ async function main(): Promise<void> {
       console.log(`  Work styles: ${wsStats.signals} canonical (${wsStats.candidates} candidates, ${wsStats.quarantined} quarantined)`);
 
       const existingDecisions = readFileIfExists(path.join(outputDir, '决策日志.md'));
-      const decisionsView = await compileDecisionsView(
-        canonicalStore.getSignals('decision'), DECISIONS_BUDGET, sourceSummary, existingDecisions ?? undefined,
-        polishConfig,
-      );
-      fs.writeFileSync(path.join(outputDir, '决策日志.md'), decisionsView.markdown);
-      canonicalStore.upsertPublishedView(decisionsView);
-      console.log(`  Written: 决策日志.md (canonical, ${decisionsView.sourceSignalIds.length} signals)`);
+      const useDecisionsArchive = config.canonical?.decisions_archive_mode === true;
+      if (useDecisionsArchive) {
+        const archiveResult = await compileDecisionsArchiveView(
+          canonicalStore.getSignals('decision'),
+          DECISIONS_ARCHIVE_BUDGET,
+          sourceSummary,
+          existingDecisions ?? undefined,
+          polishConfig,
+        );
+        fs.writeFileSync(path.join(outputDir, '决策日志.md'), archiveResult.view.markdown);
+        const archivePath = archiveResult.view.archiveFile;
+        if (archivePath != null && archiveResult.archiveMarkdown.length > 0) {
+          const archiveAbs = path.join(outputDir, archivePath);
+          fs.mkdirSync(path.dirname(archiveAbs), { recursive: true });
+          fs.writeFileSync(archiveAbs, archiveResult.archiveMarkdown);
+        }
+        canonicalStore.upsertPublishedView(archiveResult.view);
+        const archiveCount = (archiveResult.view.archiveIndex ?? [])
+          .filter((e) => e.location === 'archive')
+          .reduce((acc, e) => acc + e.count, 0);
+        console.log(
+          `  Written: 决策日志.md (archive_by_month, ${archiveResult.view.sourceSignalIds.length} signals total; ${archiveCount} in archive)`,
+        );
+      } else {
+        const decisionsView = await compileDecisionsView(
+          canonicalStore.getSignals('decision'), DECISIONS_BUDGET, sourceSummary, existingDecisions ?? undefined,
+          polishConfig,
+        );
+        fs.writeFileSync(path.join(outputDir, '决策日志.md'), decisionsView.markdown);
+        canonicalStore.upsertPublishedView(decisionsView);
+        console.log(`  Written: 决策日志.md (canonical, ${decisionsView.sourceSignalIds.length} signals)`);
+      }
 
       const existingPainPoints = readFileIfExists(path.join(outputDir, '反复痛点.md'));
       const painPointsView = await compilePainPointsView(
@@ -807,7 +834,7 @@ async function main(): Promise<void> {
     const projectDescriptions = await generateProjectDescriptions(buildProjectSummaryContexts(canonicalStore), {
       api_key: config.layer3?.api_key,
       api_base_url: config.layer3?.api_base_url,
-      model: config.layer3?.model,
+      model: config.layer3?.model ?? MODEL_DEFAULTS.extraction,
     });
 
     const timelineView = await compileTimelineView(

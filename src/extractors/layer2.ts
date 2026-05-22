@@ -10,6 +10,7 @@ import type { NoiseFilter } from '../utils/noise-filter.js';
 import type { MemoryTechPreference } from '../memory/types.js';
 import { cleanTitle } from '../canonical/views/view-text.js';
 import { polishSections, type PolishConfig } from '../canonical/views/polish.js';
+import { MODEL_DEFAULTS } from '../utils/model-defaults.js';
 
 const WORK_PATTERNS_POLISH_PROMPT = `你是一个工作模式分析编辑。输入是工作模式统计草稿（含任务类型分布、时段分布、首条消息模式），输出是润色后的中文版本。
 
@@ -446,7 +447,7 @@ async function renderWorkPatterns(
     WORK_PATTERNS_POLISH_PROMPT,
     polishConfig ?? {
       enabled: false,
-      model: 'gpt-5.4-mini',
+      model: MODEL_DEFAULTS.polish,
       max_chars_per_call: 24000,
       cache_version: 'v1',
       cache_dir: '.state',

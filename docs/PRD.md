@@ -1,8 +1,8 @@
 # PRD: Session Memory — 开发者的数据分身
 
-Date: 2026-03-19
-Version: v0.8
-Status: Implemented (all phases complete)
+Date: 2026-03-19 (v0.8) / 2026-05-22 (v0.8.1 §6.2 archive cross-link)
+Version: v0.8.1
+Status: Implemented (all phases complete); §6.2 输出目录 pending Phase A1 of PRD-modality-split.md
 
 ---
 
@@ -937,7 +937,7 @@ layer3:
 
 | 参数 | 值 | 理由 |
 |---|---|---|
-| 模型 | 可配置（提取默认 gpt-5.4-mini，合并默认 gpt-5.4，可通过 config.yaml 覆盖） | 提取阶段成本低、速度快；合并阶段用更强模型提升去重质量 |
+| 模型 | 可配置（提取默认 gpt-5.4-mini，合并默认 gpt-5.5，长上下文默认 gemini-3.1-pro-preview，润色默认 deepseek-v4-flash，可通过 config.yaml 覆盖） | 提取阶段成本低、速度快；合并阶段用更强模型提升去重质量；润色用中文原生模型提升语言质量 |
 | 并发 | 30 sessions / batch（单 session 提取阶段峰值约 90 并发） | 单 session 并发 3 个提取 prompt；不含 consolidation / project summary / Layer 4 polish |
 | 上下文裁剪 | 每 session 取前 20 条消息 | 大部分决策在前半段对话中 |
 | 去重 | 按 session_id 幂等 | 支持增量重跑 |
@@ -1197,27 +1197,39 @@ session `{session_id}` [{source_label}] — "{session_title}" ({YYYY-MM-DD})
 
 ### 6.2 输出目录
 
+> ⚠️ **本节自 2026-05-22 起被 [PRD-modality-split.md](./PRD-modality-split.md) v0.2.1 扩展**：event-modality 主文件（`项目时间线.md` / `决策日志.md` / `反复痛点.md`）将在 Phase A1 落地后引入 `archive/` 子目录承接历史月份；archive 文件通过既有 `publish-manifest.json` 暴露给消费者，主文件保留"历史索引"section 作为兜底发现机制。
+
 ```
 ~/.local/share/session-memory/
-├── 工作画像.md              # P2 — 核心画像 + 交互风格 + 技术审美
-├── 项目时间线.md            # P0
-├── 本周重点.md              # P2 — 滚动窗口
-├── 未完成线索.md            # P0
-├── 决策日志.md              # P2
-├── 反复痛点.md              # P2
-├── 技术偏好.md              # P1
-├── 工作模式.md              # P1
+├── 工作画像.md              # P2 — 核心画像 + 交互风格 + 技术审美（state，bounded）
+├── 项目时间线.md            # P0 — event log，主文件 = 最近 12 月
+├── 本周重点.md              # P2 — 滚动窗口（rolling 7d）
+├── 未完成线索.md            # P0 — thread.current（仅显示 open/in_progress/blocked）
+├── 决策日志.md              # P2 — event log，主文件 = 最近 12 月
+├── 反复痛点.md              # P2 — hybrid（顶部 derived_claim + 底部 event log 近似）
+├── 技术偏好.md              # P1 — state，bounded
+├── 工作模式.md              # P1 — derived_claim，bounded
+├── archive/                 # event-modality 历史归档（Phase A1+ 启用）
+│   ├── 项目时间线-archive.md
+│   ├── 决策日志-archive.md
+│   └── 反复痛点-archive.md
 ├── .state/                  # Canonical signal store（信号/证据/隔离区）
 │   ├── signals.json
 │   ├── evidence.json
 │   ├── quarantine.json
-│   └── publish-manifest.json
+│   └── publish-manifest.json   # 含 archiveFile / archiveIndex 字段（modality-split §4.4）
 ├── .last-extraction.json    # 增量提取元数据
 ├── .noise-report.json       # 噪音过滤报告
 └── cron.log                 # 定时提取运行日志
 ```
 
 **路径选择**：`~/.local/share/session-memory/`，不放在 opencode 或任何消费者的目录下——独立项目，独立存储。
+
+**Archive 消费策略**：
+- 默认 AI 消费（CLAUDE.md include / deep-daily-report）只 include 8 个主文件，保持冷启动 token 预算。
+- 需要历史追溯时，消费者可通过 `publish-manifest.json` 的 `archiveFile` 字段按需加载。
+- 主文件末尾的"历史索引"section 是兜底发现机制：即使消费者不读 manifest，也能从主文件得知 archive 总规模与精确路径。
+- 详细规则见 [PRD-modality-split.md §4.4](./PRD-modality-split.md)。
 
 ### 6.3 增量更新
 
@@ -1454,8 +1466,8 @@ layer3:
   batch_size: 30            # 每批并发 session 数（默认 30；单 session 提取阶段并发 3 个 prompt = 此阶段峰值约 90，不含 consolidation/polish）
   # api_key: "sk-..."       # 或设置相应环境变量
   # api_base_url: "http://localhost:14265"  # LiteLLM proxy 或其他 OpenAI 兼容端点
-  # model: "gpt-5.4-mini"                   # 提取模型（默认 gpt-5.4-mini）
-  # consolidation_model: "gpt-5.4"          # 合并去重模型（默认 gpt-5.4，比提取用更强的模型）
+# model: "gpt-5.4-mini"                   # 提取模型（默认 gpt-5.4-mini）
+# consolidation_model: "gpt-5.5"           # 合并去重模型（默认 gpt-5.5，比提取用更强的模型）
 
 # --- 输出 ---
 output_dir: "~/.local/share/session-memory"
@@ -1499,3 +1511,4 @@ memory:
 | v0.6 | 2026-03-19 | **开工前最后一轮打磨**（基于二次自审）：`Todo` 接口补 `timeCreated?` 字段（open-threads 年龄显示依赖）；澄清 Layer 2 每次全量重跑 `getMessages` 取首条消息（成本可接受，不做中间缓存）；跨项目主题聚合从 open-threads 示例移除推迟到 Phase 2；新增 §8.6 完整 config.yaml 合并参考；adapter 接口补内部缓存实现建议；成本估算补双数据源说明 |
 | v0.7 | 2026-04-23 | **文档对齐实现**：输出文件从 7 → 8（新增 `本周重点.md`）；文件名从英文改为中文；§6.1 输出文件列表 + §6.2 输出目录同步更新；Layer 3 模型描述更新为可配置（默认 anthropic/claude-haiku-4.5）+ batch_size=30；§8.6 config.yaml 补充 memory 层 + batch_size + model 完整配置；输出目录补充 `.state/`（canonical signal store）、`cron.log`；状态从 Draft → Implemented |
 | v0.8 | 2026-04-27 | **模型默认值更新 + Layer 4 polish**：代码 fallback 从 `anthropic/claude-haiku-4.5` 改为提取 `gpt-5.4-mini` / 合并 `gpt-5.4`；新增长上下文路由（`long_context_model` / `long_context_threshold`，默认 `gemini-3.1-pro-preview` / 250000 字符）；新增 Layer 4 LLM view polish（视图编译后对最终 markdown 做中文化/结构化润色，带本地缓存，不回写 canonical signals）；§5.4.1 并发表述收窄为"单 session 提取阶段"，不再涵盖 consolidation/project summary/polish |
+| v0.9 | 2026-05-22 | **模型默认值更新**：合并去重模型从 `gpt-5.4` 升级为 `gpt-5.5`（更强的推理能力，合并去重质量更高）；Layer 4 polish 模型从 `gpt-5.4-mini` 改为 `deepseek-v4-flash`（中文原生，润色更自然，成本更低）；提取和长上下文模型保持不变 |

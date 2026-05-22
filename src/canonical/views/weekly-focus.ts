@@ -1,6 +1,7 @@
 import type { CanonicalSignal, PublishedView, PublishedViewSection, ViewBudget } from '../types.js';
 import { cleanProjectName, cleanTitle, cleanViewText, finalizeMarkdownWithinBudget, formatDateLabel } from './view-text.js';
 import { polishSections, type PolishConfig } from './polish.js';
+import { MODEL_DEFAULTS } from '../../utils/model-defaults.js';
 
 type TimelineSignal = Extract<CanonicalSignal, { kind: 'timeline_event' }>;
 type OpenThreadSignal = Extract<CanonicalSignal, { kind: 'open_thread' }>;
@@ -201,7 +202,7 @@ export async function compileWeeklyFocusView(
     WEEKLY_FOCUS_POLISH_PROMPT,
     polishConfig ?? {
       enabled: false,
-      model: 'gpt-5.4-mini',
+      model: MODEL_DEFAULTS.polish,
       max_chars_per_call: 24000,
       cache_version: 'v1',
       cache_dir: '.state',

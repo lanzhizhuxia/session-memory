@@ -178,6 +178,7 @@ export type CanonicalSignal =
   | (CanonicalSignalBase & { kind: 'timeline_event'; payload: TimelineEventPayload })
   | (CanonicalSignalBase & { kind: 'open_thread'; payload: OpenThreadPayload });
 
+/** @deprecated Legacy metadata only. Not consumed at runtime. Use {@link ViewRetention} instead. */
 export type ViewBuildMode = 'full_rebuild' | 'append_only' | 'rolling_window';
 
 export type ViewModality =
@@ -202,6 +203,7 @@ export interface PolishEntryRef {
 
 export interface ViewBudget {
   viewId: string;
+  /** @deprecated Legacy metadata. Use {@link retention} instead. Retained only to avoid breaking existing budget constant definitions. */
   buildMode: ViewBuildMode;
   maxSignals?: number;
   maxChars: number;

@@ -43,6 +43,7 @@ import { PAIN_POINTS_BUDGET, compilePainPointsView } from '../src/canonical/view
 import { TIMELINE_BUDGET, compileTimelineView } from '../src/canonical/views/timeline.js';
 import { OPEN_THREADS_BUDGET, compileOpenThreadsView } from '../src/canonical/views/open-threads.js';
 import { WEEKLY_FOCUS_BUDGET, compileWeeklyFocusView } from '../src/canonical/views/weekly-focus.js';
+import { WORK_PATTERNS_BUDGET, compileWorkPatternsView } from '../src/canonical/views/work-patterns.js';
 import type { PolishConfig } from '../src/canonical/views/polish.js';
 import type { QuarantineRecord } from '../src/canonical/store.js';
 import type { SignalCandidate, SignalKind, ViewBudget, EvidenceRecord } from '../src/canonical/types.js';
@@ -591,6 +592,15 @@ async function main(): Promise<void> {
   console.log(`  Tech mentions: ${layer2Result.techMentions.length} technologies detected`);
 
   if (canonicalEnabled) {
+    // Track 工作模式.md in publish manifest (unified compiler, no signal store)
+    const canonicalStoreL2 = new CanonicalStore(path.join(outputDir, '.state'));
+    canonicalStoreL2.load();
+    const workPatternsView = compileWorkPatternsView(
+      layer2Result.workPatternsContent, WORK_PATTERNS_BUDGET, sourceSummary,
+    );
+    canonicalStoreL2.upsertPublishedView(workPatternsView);
+    canonicalStoreL2.save();
+
     console.log('  Canonical tech_preference pipeline...');
 
     const canonicalStore = new CanonicalStore(path.join(outputDir, '.state'));
@@ -627,7 +637,21 @@ async function main(): Promise<void> {
     );
 
     canonicalStore.addEvidence(extracted.evidence);
-    canonicalStore.replaceSignals('tech_preference', mergeResult.signals.filter((signal) => signal.kind === 'tech_preference'));
+    const existingTechPrefs = canonicalStore.getSignals('tech_preference');
+    const nextTechPrefs = mergeResult.signals.filter((signal) => signal.kind === 'tech_preference');
+    const hadCandidates = extracted.candidates.length > 0;
+    const hadAccepted = acceptedCandidates.length > 0;
+    if (existingTechPrefs.length > 0 && nextTechPrefs.length === 0) {
+      if (hadCandidates && !hadAccepted) {
+        console.warn(`  Skipping tech_preference replace: ${extracted.candidates.length} candidates all rejected by quality gate, keeping ${existingTechPrefs.length} existing signals`);
+      } else if (hadCandidates && hadAccepted) {
+        console.warn(`  Skipping tech_preference replace: ${acceptedCandidates.length} accepted candidates merged to empty, keeping ${existingTechPrefs.length} existing signals (possible merge failure)`);
+      } else {
+        console.warn(`  Skipping tech_preference replace: merge result is empty but store has ${existingTechPrefs.length} existing signals`);
+      }
+    } else {
+      canonicalStore.replaceSignals('tech_preference', nextTechPrefs);
+    }
     canonicalStore.addQuarantine([...quarantineRecords, ...mergeResult.quarantined.map((candidate) => ({
       candidate,
       reasonCodes: ['merge_rejected'],

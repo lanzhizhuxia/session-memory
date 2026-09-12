@@ -48,10 +48,19 @@ session-memory 把这些对话变成 **8 个结构化的 markdown 文件**，构
 
 三层提取负责生成 canonical signals；在视图编译之后，系统还会执行独立的 **Layer 4 LLM polish** 输出后处理，用于提升中文可读性、结构一致性和术语表达，但不改变底层信号存储。
 
-Layer 3 使用可配置模型：提取阶段默认 `gpt-5.4-mini`，合并去重阶段默认 `gpt-5.5`（用更强模型提升合并质量），长上下文路由默认 `gemini-3.1-pro-preview`。默认 `batch_size=30`，Layer 3 单 session 提取阶段并发触发 3 次 AI 调用，因此这一阶段峰值约 90 并发（不含后续 consolidation、project summary、Layer 4 polish）。对超长输入，系统会在超过 `long_context_threshold` 后自动切换到 `long_context_model`。
+Layer 3 使用可配置模型。默认配置见 `config.example.yaml`。单 session 提取阶段并发触发 3 次 AI 调用，因此这一阶段峰值约 90 并发（不含后续 consolidation、project summary、Layer 4 polish）。对超长输入，系统会在超过 `long_context_threshold` 后自动切换到 `long_context_model`。
 
 工作画像的核心画像由 AI 语义提取器生成（一次调用，综合 memory + 决策 + 项目分布）。
 项目描述由 AI batch 调用生成（render-time metadata，不存储）。
+
+### 信号存储与视图编译
+
+提取后的 canonical signals 持久化在 `.state/signals.json`，跨 run 累积：
+
+- **事件类信号**（timeline_event / open_thread / decision / pain_point / work_style / profile_fact）默认增量 merge（基于 canonicalKey 去重 upsert），不会因单次 run 失败而丢失已有数据
+- **重算类信号**（tech_preference）每次从全部 session 重新提取并全量替换，但有空结果保护（旧数据 > 0 且本轮产出为空时 skip replace）
+
+视图编译层（8 个 markdown 文件）每次从全部 canonical signals 重新编译为快照视图，按 budget 排序/裁剪。`ViewBudget.buildMode` 字段已标记为 `@deprecated`——运行时行为由 `retention` 字段控制。
 
 ### Layer 4 LLM polish（输出后处理）
 

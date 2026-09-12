@@ -627,7 +627,7 @@ const CONSOLIDATE_PREFERENCES_PROMPT = `你是一个用户画像编辑器。你�
 4. 删除关于 AI 自身行为的观察
 5. 每条观察必须有具体 evidence，不能太抽象
 
-输入是 JSON 数组，输出精炼后的 JSON 数组。只返回 JSON。
+输入是 JSON 数组，输出精炼后的 JSON 对象。只返回 JSON。
 **严格要求**：每个对象必须包含全部 3 个字段（category, observation, evidence），都是非空字符串。绝对不要省略任何 key。
 输出格式：{ "preferences": [{ "category": "分类名", "observation": "观察", "evidence": "证据" }] }`;
 
@@ -659,7 +659,7 @@ async function consolidateDecisions(decisions: Decision[], config: Layer3Config)
     }
 
     const cModel = config.consolidation_model ?? config.model ?? MODEL_DEFAULTS.consolidation;
-    const response = await callAI(CONSOLIDATE_DECISIONS_PROMPT, text, config, cModel, 8192);
+    const response = await callAI(CONSOLIDATE_DECISIONS_PROMPT, text, config, cModel, 16384);
     const parsed = parseJSON<{ decisions: unknown[] }>(response);
     if (Array.isArray(parsed?.decisions)) {
       const first = decs[0];

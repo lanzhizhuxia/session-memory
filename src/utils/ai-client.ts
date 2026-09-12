@@ -30,13 +30,25 @@ function normalizeAIResponseKeys(obj: Record<string, unknown>): Record<string, u
   return result;
 }
 
-export async function callAI(
+export interface AIResponse {
+  content: string | null;
+  reasoningContent: string | null;
+  finishReason: string | null;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    reasoningTokens: number | null;
+  } | null;
+}
+
+export async function callAIWithMeta(
   systemPrompt: string,
   userContent: string,
   config: AIClientConfig,
   model: string,
-  maxTokens: number = 2048,
-): Promise<string | null> {
+  maxTokens: number = 4096,
+): Promise<AIResponse | null> {
   const apiKey = config.api_key || process.env.ANTHROPIC_API_KEY;
   const baseUrl = config.api_base_url || process.env.ANTHROPIC_API_BASE_URL || 'https://api.anthropic.com';
 
@@ -100,10 +112,32 @@ export async function callAI(
 
       if (isAnthropicNative) {
         const text = data.content?.find((c: { type: string; text?: string }) => c.type === 'text')?.text;
-        return text ?? null;
+        return {
+          content: text ?? null,
+          reasoningContent: null,
+          finishReason: data.stop_reason ?? null,
+          usage: data.usage ? {
+            promptTokens: data.usage.input_tokens ?? 0,
+            completionTokens: data.usage.output_tokens ?? 0,
+            totalTokens: (data.usage.input_tokens ?? 0) + (data.usage.output_tokens ?? 0),
+            reasoningTokens: null,
+          } : null,
+        };
       }
 
-      return data.choices?.[0]?.message?.content ?? null;
+      const choice = data.choices?.[0];
+      const usage = data.usage;
+      return {
+        content: choice?.message?.content ?? null,
+        reasoningContent: choice?.message?.reasoning_content ?? null,
+        finishReason: choice?.finish_reason ?? null,
+        usage: usage ? {
+          promptTokens: usage.prompt_tokens ?? 0,
+          completionTokens: usage.completion_tokens ?? 0,
+          totalTokens: usage.total_tokens ?? 0,
+          reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? null,
+        } : null,
+      };
     } catch (err) {
       if (attempt < MAX_RETRIES) {
         const delayMs = RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500;
@@ -117,6 +151,21 @@ export async function callAI(
   }
 
   return null;
+}
+
+/**
+ * Backward-compatible wrapper: returns content string only.
+ * Prefer callAIWithMeta for new code that needs diagnostics.
+ */
+export async function callAI(
+  systemPrompt: string,
+  userContent: string,
+  config: AIClientConfig,
+  model: string,
+  maxTokens: number = 4096,
+): Promise<string | null> {
+  const result = await callAIWithMeta(systemPrompt, userContent, config, model, maxTokens);
+  return result?.content ?? null;
 }
 
 export function parseJSON<T>(text: string | null): T | null {
@@ -135,9 +184,16 @@ export function parseJSON<T>(text: string | null): T | null {
     candidates.push(trimmedText.slice(objectStart, objectEnd + 1));
   }
 
+  const arrayStart = trimmedText.indexOf('[');
+  const arrayEnd = trimmedText.lastIndexOf(']');
+  if (arrayStart !== -1 && arrayEnd > arrayStart) {
+    candidates.push(trimmedText.slice(arrayStart, arrayEnd + 1));
+  }
+
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) return parsed as unknown as T;
       return normalizeAIResponseKeys(parsed) as T;
     } catch {
       continue;

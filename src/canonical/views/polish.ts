@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { callAI, parseJSON } from '../../utils/ai-client.js';
+import { callAIWithMeta, parseJSON } from '../../utils/ai-client.js';
 
 export interface PolishConfig {
   enabled: boolean;
@@ -154,50 +154,83 @@ export async function polishSections(
   const cacheKeyBySectionId = new Map(uncached.map((entry) => [entry.section.sectionId, entry.cacheKey]));
 
   for (const batch of batches) {
-    const inputPayload = JSON.stringify({ viewTitle, sections: batch });
-    const estimatedOutputTokens = Math.min(16384, Math.max(8192, inputPayload.length));
+    const splitBatch = [batch];
+    let retryRound = 0;
 
-    const responseText = await callAI(
-      polishPrompt,
-      inputPayload,
-      config,
-      config.model,
-      estimatedOutputTokens,
-    );
+    while (splitBatch.length > 0) {
+      const current = splitBatch.shift()!;
+      const inputPayload = JSON.stringify({ viewTitle, sections: current });
+      const estimatedOutputTokens = Math.min(65536, Math.max(16384, inputPayload.length));
 
-    const parsed = parseJSON<PolishResponse>(responseText);
-    if (!parsed?.sections || parsed.sections.length === 0) {
-      const preview = responseText ? responseText.slice(0, 300) : '(null)';
-      console.warn(`  View polish batch failed: response had ${responseText?.length ?? 0} chars, parsed ${parsed?.sections?.length ?? 0} sections. Input: ${batch.length} sections, ${inputPayload.length} chars. Preview: ${preview}`);
-    }
-    const polishedById = new Map<string, string>();
-    for (const item of parsed?.sections ?? []) {
-      if (item?.sectionId && typeof item.markdown === 'string' && item.markdown.trim().length > 0) {
-        polishedById.set(item.sectionId, item.markdown);
-      }
-    }
+      const aiResponse = await callAIWithMeta(
+        polishPrompt,
+        inputPayload,
+        config,
+        config.model,
+        estimatedOutputTokens,
+      );
 
-    for (const section of batch) {
-      const polished = polishedById.get(section.sectionId);
-      if (polished != null) {
-        result.set(section.sectionId, polished);
-        const cacheKey = cacheKeyBySectionId.get(section.sectionId);
-        if (cacheKey) {
-          cache[cacheKey] = {
-            markdown: polished,
-            model: config.model,
-            cacheVersion: config.cache_version,
-            createdAt: new Date().toISOString(),
-          };
+      const responseText = aiResponse?.content ?? null;
+      const parsed = parseJSON<PolishResponse>(responseText);
+      if (!parsed?.sections || parsed.sections.length === 0) {
+        if (current.length > 1) {
+          const mid = Math.ceil(current.length / 2);
+          splitBatch.unshift(current.slice(mid));
+          splitBatch.unshift(current.slice(0, mid));
+          retryRound++;
+          continue;
         }
-        polishedCount++;
-      } else {
-        result.set(section.sectionId, section.draftMarkdown);
-        failedCount++;
+        const preview = responseText ? responseText.slice(0, 300) : '(null)';
+        const tail = responseText ? responseText.slice(-200) : '(null)';
+        const diag = aiResponse ? ` finish_reason=${aiResponse.finishReason} reasoning_tokens=${aiResponse.usage?.reasoningTokens ?? 'N/A'}` : ' no_meta';
+        console.warn(`  View polish batch failed: response had ${responseText?.length ?? 0} chars, parsed ${parsed?.sections?.length ?? 0} sections.${diag} Input: 1 section, ${inputPayload.length} chars. Preview: ${preview} Tail: ${tail}`);
+        for (const section of current) {
+          result.set(section.sectionId, section.draftMarkdown);
+          failedCount++;
+        }
+        saveCache(config, cache);
+        continue;
       }
-    }
+      const polishedById = new Map<string, string>();
+      for (const item of parsed.sections) {
+        if (item?.sectionId && typeof item.markdown === 'string' && item.markdown.trim().length > 0) {
+          polishedById.set(item.sectionId, item.markdown);
+        }
+      }
 
-    saveCache(config, cache);
+      const missing: typeof current = [];
+      for (const section of current) {
+        const polished = polishedById.get(section.sectionId);
+        if (polished != null) {
+          result.set(section.sectionId, polished);
+          const cacheKey = cacheKeyBySectionId.get(section.sectionId);
+          if (cacheKey) {
+            cache[cacheKey] = {
+              markdown: polished,
+              model: config.model,
+              cacheVersion: config.cache_version,
+              createdAt: new Date().toISOString(),
+            };
+          }
+          polishedCount++;
+        } else {
+          missing.push(section);
+        }
+      }
+
+      if (missing.length > 0) {
+        if (missing.length < current.length) {
+          splitBatch.unshift(missing);
+          continue;
+        }
+        for (const section of missing) {
+          result.set(section.sectionId, section.draftMarkdown);
+          failedCount++;
+        }
+      }
+
+      saveCache(config, cache);
+    }
   }
 
   console.log(`  View polish: ${polishedCount} sections polished, ${cachedCount} cached, ${failedCount} failed`);
